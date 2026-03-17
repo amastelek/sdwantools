@@ -18,12 +18,13 @@ fi
 # Dependency check + auto-install on openSUSE 15.6
 # ------------------------------------------------
 missing=()
-for cmd in whiptail btop speedtest trip tuptime vnstat; do
+for cmd in whiptail btop speedtest trip tuptime vnstat nmap; do
   command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
 done
 [[ ! -x /usr/local/sbin/ping_sla.sh ]] && missing+=("ping_sla.sh")
 [[ ! -x /usr/local/sbin/ping_speedtest.sh ]] && missing+=("ping_speedtest.sh")
 [[ ! -x /usr/local/sbin/listneighbours.sh ]] && missing+=("listneighbours.sh")
+[[ ! -x /usr/local/sbin/asn ]] && missing+=("asn")
 [[ ! -x /usr/local/sbin/prettyping ]] && missing+=("prettyping")
 
 if [[ ${#missing[@]} -gt 0 && "$is_opensuse_156" == true ]]; then
@@ -77,22 +78,34 @@ if [[ ${#missing[@]} -gt 0 && "$is_opensuse_156" == true ]]; then
         sudo curl -L -o /usr/local/sbin/ping_speedtest.sh https://raw.githubusercontent.com/amastelek/sdwantools/refs/heads/main/ping_speedtest.sh
         sudo chmod +x /usr/local/sbin/ping_speedtest.sh
         ;;
+      nmap)
+        echo "→ Installing nmap"
+        sudo zypper install -y nmap
+        ;;
       listneighbours.sh)
         echo "→ Downloading listneighbours.sh to /usr/local/sbin"
         sudo curl -L -o /usr/local/sbin/listneighbours.sh https://raw.githubusercontent.com/amastelek/sdwantools/refs/heads/main/listneighbours.sh
         sudo chmod +x /usr/local/sbin/listneighbours.sh
+        ;;
+      asn)
+        echo "→ Installing asn prerequisites"
+        sudo zypper in -y curl whois bind-utils mtr jq nmap ncat ipcalc aha grepcidr
+        echo "→ Downloading asn to /usr/local/sbin"
+        sudo curl -o /usr/local/sbin/asn https://raw.githubusercontent.com/nitefood/asn/master/asn
+        sudo chmod 755 /usr/local/sbin/asn
         ;;
     esac
   done
 
   # Re-check after installation
   missing=()
-  for cmd in whiptail btop speedtest trip tuptime vnstat; do
+  for cmd in whiptail btop speedtest trip tuptime vnstat nmap; do
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
   [[ ! -x /usr/local/sbin/ping_sla.sh ]] && missing+=("ping_sla.sh")
   [[ ! -x /usr/local/sbin/ping_speedtest.sh ]] && missing+=("ping_speedtest.sh")
   [[ ! -x /usr/local/sbin/listneighbours.sh ]] && missing+=("listneighbours.sh")
+  [[ ! -x /usr/local/sbin/asn ]] && missing+=("asn")
   [[ ! -x /usr/local/sbin/prettyping ]] && missing+=("prettyping")
 fi
 
@@ -273,6 +286,127 @@ do_reports_submenu() {
         echo "Press Enter to return..."
         read -r
         ;;
+      nft)
+        clear
+        echo "=== Firewall Ruleset (nft list ruleset) ==="
+        echo "=========================================="
+        sudo nft list ruleset
+        echo
+        echo "Press Enter to return..."
+        read -r
+        ;;
+      nft)
+        clear
+        echo "=== nftables Ruleset (nft list ruleset) ==="
+        echo "=========================================="
+        nft list ruleset
+        echo
+        echo "Press Enter to return..."
+        read -r
+        ;;
+      nft)
+        clear
+        echo "=== nftables Ruleset (nft list ruleset) ==="
+        echo "=========================================="
+        nft list ruleset
+        echo
+        echo "Press Enter to return..."
+        read -r
+        ;;
+      nft)
+        clear
+        echo "=== Firewall Ruleset (nft list ruleset) ==="
+        echo "=========================================="
+        sudo nft list ruleset
+        echo
+        echo "Press Enter to return..."
+        read -r
+        ;;
+      nft)
+        clear
+        echo "=== nftables Ruleset (nft list ruleset) ==="
+        echo "=========================================="
+        sudo nft list ruleset
+        echo
+        echo "Press Enter to return..."
+        read -r
+        ;;
+      nft)
+        clear
+        echo "=== nftables Ruleset (nft list ruleset) ==="
+        echo "=========================================="
+        nft list ruleset
+        echo
+        echo "Press Enter to return..."
+        read -r
+        ;;
+      nft)
+        clear
+        echo "=== nftables Ruleset (nft list ruleset) ==="
+        echo "=========================================="
+        nft list ruleset
+        echo
+        echo "Press Enter to return..."
+        read -r
+        ;;
+      nft)
+        clear
+        echo "=== Firewall Ruleset (nft list ruleset) ==="
+        echo "=========================================="
+        sudo nft list ruleset
+        echo
+        echo "Press Enter to return..."
+        read -r
+        ;;
+      nft)
+        clear
+        echo "=== nftables Ruleset (nft list ruleset) ==="
+        echo "=========================================="
+        sudo nft list ruleset
+        echo
+        echo "Press Enter to return..."
+        read -r
+        ;;
+      nft)
+        clear
+        echo "=== nftables Ruleset (nft list ruleset) ==="
+        echo "=========================================="
+        sudo nft list ruleset
+        echo
+        echo "Press Enter to return..."
+        read -r
+        ;;
+      vulners)
+        local vtarget
+        vtarget=$(whiptail --title "Nmap Vulners Scan" \
+          --inputbox "Enter target hostname or IP to scan:" \
+          10 60 "" 3>&1 1>&2 2>&3)
+        [[ -z "$vtarget" ]] && continue
+        clear
+        echo "=== Nmap Vulners Scan: $vtarget ==="
+        echo "===================================="
+        echo "Running: nmap -sV --script vulners $vtarget"
+        echo "(this may take a moment)"
+        echo
+        sudo nmap -sV --script vulners "$vtarget"
+        echo
+        echo "Press Enter to return..."
+        read -r
+        ;;
+      asn)
+        local atarget
+        atarget=$(whiptail --title "ASN Lookup / Trace" \
+          --inputbox "Enter target hostname or IP:" \
+          10 60 "" 3>&1 1>&2 2>&3)
+        [[ -z "$atarget" ]] && continue
+        clear
+        echo "=== ASN Lookup: $atarget ==="
+        echo "============================"
+        /usr/local/sbin/asn "$atarget"
+        echo
+        echo "Press Enter to return..."
+        read -r
+        ;;
       Back|"")
         return
         ;;
@@ -328,6 +462,8 @@ do_traces() {
   # heuristics introduced in Trippy 0.12 / present in 0.13.
   trip --interface "$int" \
        --tui-custom-columns holsravbwdtFBD \
+       --first-ttl 2 \
+       --tcp \
        "$target"
 }
 
@@ -428,12 +564,15 @@ do_node_diagnostics() {
     local choice
     choice=$(whiptail --title "Node Diagnostics" \
       --menu "Select diagnostic to run:" \
-      18 80 8 \
-      "bondlog"   "Bond log - last 100 entries" \
-      "juggler"   "Juggler service log - last 100 entries (current boot)" \
-      "dmesg"     "Kernel ring buffer (dmesg)" \
+      22 80 10 \
+      "bondlog"    "Bond log - last 100 entries" \
+      "juggler"    "Juggler service log - last 100 entries (current boot)" \
+      "dmesg"      "Kernel ring buffer (dmesg)" \
       "neighbours" "List network neighbours (ARP/NDP)" \
-      "Back"      "Return to main menu" \
+      "nft"        "Firewall ruleset (nft list ruleset)" \
+      "vulners"    "Nmap vulners scan (input host)" \
+      "asn"        "ASN lookup / trace (input host)" \
+      "Back"       "Return to main menu" \
       3>&1 1>&2 2>&3)
 
     case "$choice" in
@@ -469,6 +608,46 @@ do_node_diagnostics() {
         echo "=== Network Neighbours (listneighbours) ==="
         echo "=========================================="
         /usr/local/sbin/listneighbours.sh
+        echo
+        echo "Press Enter to return..."
+        read -r
+        ;;
+      nft)
+        clear
+        echo "=== Firewall Ruleset (nft list ruleset) ==="
+        echo "=========================================="
+        sudo nft list ruleset
+        echo
+        echo "Press Enter to return..."
+        read -r
+        ;;
+      vulners)
+        local vtarget
+        vtarget=$(whiptail --title "Nmap Vulners Scan" \
+          --inputbox "Enter target hostname or IP to scan:" \
+          10 60 "" 3>&1 1>&2 2>&3)
+        [[ -z "$vtarget" ]] && continue
+        clear
+        echo "=== Nmap Vulners Scan: $vtarget ==="
+        echo "===================================="
+        echo "Running: sudo nmap -sV --script vulners $vtarget"
+        echo "(this may take a moment)"
+        echo
+        sudo nmap -sV --script vulners "$vtarget"
+        echo
+        echo "Press Enter to return..."
+        read -r
+        ;;
+      asn)
+        local atarget
+        atarget=$(whiptail --title "ASN Lookup / Trace" \
+          --inputbox "Enter target hostname or IP:" \
+          10 60 "" 3>&1 1>&2 2>&3)
+        [[ -z "$atarget" ]] && continue
+        clear
+        echo "=== ASN Lookup: $atarget ==="
+        echo "============================"
+        /usr/local/sbin/asn "$atarget"
         echo
         echo "Press Enter to return..."
         read -r
