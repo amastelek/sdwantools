@@ -675,7 +675,7 @@ while true; do
     "Bastion"        "SSH jump to configured hosts" \
     "Reports"        "System & SLA reports submenu" \
     "Extended ping"  "Pretty ping with auto RTT thresholds" \
-    "Diagnostics"    "Node diagnostics (bondlog, juggler, dmesg)" \
+    "Diagnostics"    "Node diagnostics (Logs and Tools)" \
     "Exit"           "Exit the menu" \
     3>&1 1>&2 2>&3)
 
