@@ -25,6 +25,7 @@ done
 [[ ! -x /usr/local/sbin/ping_speedtest.sh ]] && missing+=("ping_speedtest.sh")
 [[ ! -x /usr/local/sbin/listneighbours.sh ]] && missing+=("listneighbours.sh")
 [[ ! -x /usr/local/sbin/asn ]] && missing+=("asn")
+[[ ! -x /usr/local/sbin/net_sla_monitor.sh ]] && missing+=("net_sla_monitor.sh")
 [[ ! -x /usr/local/sbin/prettyping ]] && missing+=("prettyping")
 
 if [[ ${#missing[@]} -gt 0 && "$is_opensuse_156" == true ]]; then
@@ -94,6 +95,11 @@ if [[ ${#missing[@]} -gt 0 && "$is_opensuse_156" == true ]]; then
         sudo curl -o /usr/local/sbin/asn https://raw.githubusercontent.com/nitefood/asn/master/asn
         sudo chmod 755 /usr/local/sbin/asn
         ;;
+      net_sla_monitor.sh)
+        echo "→ Downloading net_sla_monitor.sh to /usr/local/sbin"
+        sudo curl -L -o /usr/local/sbin/net_sla_monitor.sh https://raw.githubusercontent.com/amastelek/sdwantools/refs/heads/main/net_sla_monitor.sh
+        sudo chmod +x /usr/local/sbin/net_sla_monitor.sh
+        ;;
     esac
   done
 
@@ -106,6 +112,7 @@ if [[ ${#missing[@]} -gt 0 && "$is_opensuse_156" == true ]]; then
   [[ ! -x /usr/local/sbin/ping_speedtest.sh ]] && missing+=("ping_speedtest.sh")
   [[ ! -x /usr/local/sbin/listneighbours.sh ]] && missing+=("listneighbours.sh")
   [[ ! -x /usr/local/sbin/asn ]] && missing+=("asn")
+  [[ ! -x /usr/local/sbin/net_sla_monitor.sh ]] && missing+=("net_sla_monitor.sh")
   [[ ! -x /usr/local/sbin/prettyping ]] && missing+=("prettyping")
 fi
 
@@ -126,6 +133,7 @@ fi
 # ------------------------------------------------
 CRON_SLA='*/10 * * * *    /usr/local/sbin/ping_sla.sh'
 CRON_SPEEDTEST='@daily          /usr/local/sbin/ping_speedtest.sh'
+CRON_NETMON='*/20 * * * *    /usr/local/sbin/net_sla_monitor.sh'
 
 _crontab_has() {
   crontab -l 2>/dev/null | grep -qF "$1"
@@ -144,6 +152,10 @@ fi
 
 if ! _crontab_has '/usr/local/sbin/ping_speedtest.sh'; then
   _add_cron_entry "$CRON_SPEEDTEST" "ping_speedtest.sh daily"
+fi
+
+if ! _crontab_has '/usr/local/sbin/net_sla_monitor.sh'; then
+  _add_cron_entry "$CRON_NETMON" "net_sla_monitor.sh every 20 minutes"
 fi
 
 # ------------------------------------------------
@@ -228,6 +240,7 @@ do_reports_submenu() {
       "vnstat"         "Network traffic statistics" \
       "sla"            "SLA ping report (query=sla)" \
       "speedtest_hist" "Speedtest history (query=speedtest)" \
+      "net_sla"        "Network SLA monitor report" \
       "Back"           "Return to main menu" \
       3>&1 1>&2 2>&3)
 
@@ -407,6 +420,16 @@ do_reports_submenu() {
         echo "Press Enter to return..."
         read -r
         ;;
+
+      net_sla)
+        clear
+        echo "=== Network SLA Monitor Report ==="
+        echo "================================="
+        /usr/local/sbin/net_sla_monitor.sh query
+        echo
+        echo "Press Enter to return..."
+        read -r
+        ;;
       Back|"")
         return
         ;;
@@ -572,6 +595,7 @@ do_node_diagnostics() {
       "nft"        "Firewall ruleset (nft list ruleset)" \
       "vulners"    "Nmap vulners scan (input host)" \
       "asn"        "ASN lookup / trace (input host)" \
+      "ethtool"    "Interface statistics (ethtool -S)" \
       "Back"       "Return to main menu" \
       3>&1 1>&2 2>&3)
 
@@ -652,6 +676,33 @@ do_node_diagnostics() {
         echo "Press Enter to return..."
         read -r
         ;;
+      ethtool)
+        local eth_menu=()
+        # Physical Ethernet only — exclude virtual types: gretap, erspan, br*, ifb*
+        while IFS= read -r iface; do
+          eth_menu+=("$iface" "$iface")
+        done < <(ip -o link show \
+                   | awk '/link\/ether/ {gsub(/:$/, "", $2); print $2}' \
+                   | grep -Ev '^(gretap|erspan|br|ifb)')
+
+        if [[ ${#eth_menu[@]} -eq 0 ]]; then
+          whiptail --title "Error" --msgbox "No Ethernet interfaces found!" 10 60
+          continue
+        fi
+
+        local eif
+        eif=$(whiptail --title "ethtool Statistics" \
+          --menu "Select Ethernet interface to inspect:" \
+          18 60 8 "${eth_menu[@]}" 3>&1 1>&2 2>&3)
+        [[ -z "$eif" ]] && continue
+        clear
+        echo "=== ethtool -S $eif ==="
+        echo "========================"
+        sudo ethtool -S "$eif"
+        echo
+        echo "Press Enter to return..."
+        read -r
+        ;;
       Back|"")
         return
         ;;
@@ -675,7 +726,7 @@ while true; do
     "Bastion"        "SSH jump to configured hosts" \
     "Reports"        "System & SLA reports submenu" \
     "Extended ping"  "Pretty ping with auto RTT thresholds" \
-    "Diagnostics"    "Node diagnostics (Logs and Tools)" \
+    "Diagnostics"    "Node diagnostics (bondlog, juggler, dmesg)" \
     "Exit"           "Exit the menu" \
     3>&1 1>&2 2>&3)
 
