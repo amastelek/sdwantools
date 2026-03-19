@@ -9,6 +9,7 @@
 # Usage:
 #   ./net_sla_monitor.sh           — run probes and append results to CSV
 #   ./net_sla_monitor.sh query     — print SLA dashboard (no probing)
+#   ./net_sla_monitor.sh speedtest — run Ookla speedtest on each interface IP
 #
 # Crontab (every 20 minutes):
 #   */20 * * * * /path/to/net_sla_monitor.sh >> /var/log/net_sla_monitor.log 2>&1
@@ -310,14 +311,98 @@ do_query() {
     ' "$CSV_FILE"
 }
 
+# ── Shared interface iterator ──────────────────────────────────────────────────
+# Calls  callback_fn <iface> <ip>  for every eligible interface IP.
+# Applies the same SKIP_IFACE_PATTERNS / SKIP_IP_PREFIXES rules as probing.
+each_eligible_iface() {
+    local callback="$1"
+    local cur_iface=""
+
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^[0-9]+:[[:space:]]+([^:@[:space:]]+) ]]; then
+            cur_iface="${BASH_REMATCH[1]}"
+            continue
+        fi
+        if [[ "$line" =~ ^[[:space:]]+inet[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) ]]; then
+            local ip="${BASH_REMATCH[1]}"
+            [[ -z "$cur_iface" ]]         && continue
+            is_iface_skipped "$cur_iface" && continue
+            is_ip_skipped    "$ip"        && continue
+            "$callback" "$cur_iface" "$ip"
+        fi
+    done < <(ip -4 addr show 2>/dev/null)
+}
+
+# ── Speedtest mode ─────────────────────────────────────────────────────────────
+do_speedtest() {
+    # Locate the Ookla speedtest binary
+    local st_bin
+    st_bin=$(command -v speedtest 2>/dev/null || true)
+
+    if [[ -z "$st_bin" ]]; then
+        echo "ERROR: 'speedtest' binary not found in PATH."
+        echo "Install from https://www.speedtest.net/apps/cli"
+        echo "  Debian/Ubuntu : apt install speedtest"
+        echo "  RHEL/CentOS   : yum install speedtest"
+        exit 1
+    fi
+
+    log "Starting speedtest run  binary=$st_bin"
+
+    local run_count=0
+
+    # Inner callback -- called once per eligible interface by each_eligible_iface
+    _run_speedtest_on_iface() {
+        local iface="$1"
+        local ip="$2"
+        local now
+        now=$(ts)
+
+        printf "\n"
+        printf -- "----------------------------------------------------------------\n"
+        printf "  Interface : %s\n"  "$iface"
+        printf "  Source IP : %s\n"  "$ip"
+        printf "  Started   : %s\n"  "$now"
+        printf -- "----------------------------------------------------------------\n"
+
+        # --accept-license / --accept-gdpr suppress the one-time interactive
+        #   consent prompts so the binary works unattended.
+        # --ip binds the TCP connection to this specific source IP,
+        #   ensuring the test is routed through the intended interface.
+        # --format=human-readable gives the clearest terminal output.
+        #   Use --format=json if you want machine-parseable results instead.
+        if "$st_bin" \
+                --accept-license \
+                --accept-gdpr \
+                --ip "$ip" \
+                --format=human-readable; then
+            log "  $iface ($ip) speedtest completed OK"
+        else
+            log "  $iface ($ip) speedtest FAILED (exit code $?)"
+        fi
+
+        (( run_count++ )) || true
+    }
+
+    each_eligible_iface _run_speedtest_on_iface
+
+    printf "\n"
+    if (( run_count == 0 )); then
+        log "No eligible interfaces found. Nothing to test."
+    else
+        log "Speedtest complete -- $run_count interface(s) tested."
+    fi
+}
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 main() {
     local mode="${1:-probe}"
     init_csv
 
     case "$mode" in
-        query|--query|-q) do_query   ;;
-        probe|--probe|-p|*) do_probe ;;
+        query|--query|-q)         do_query     ;;
+        speedtest|--speedtest|-s) do_speedtest ;;
+        probe|--probe|-p|*)       do_probe     ;;
     esac
 }
 
