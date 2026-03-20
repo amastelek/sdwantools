@@ -26,6 +26,7 @@ done
 [[ ! -x /usr/local/sbin/listneighbours.sh ]] && missing+=("listneighbours.sh")
 [[ ! -x /usr/local/sbin/asn ]] && missing+=("asn")
 [[ ! -x /usr/local/sbin/net_sla_monitor.sh ]] && missing+=("net_sla_monitor.sh")
+[[ ! -x /usr/local/sbin/lan_monitor.sh ]] && missing+=("lan_monitor.sh")
 [[ ! -x /usr/local/sbin/prettyping ]] && missing+=("prettyping")
 
 if [[ ${#missing[@]} -gt 0 && "$is_opensuse_156" == true ]]; then
@@ -100,6 +101,11 @@ if [[ ${#missing[@]} -gt 0 && "$is_opensuse_156" == true ]]; then
         sudo curl -L -o /usr/local/sbin/net_sla_monitor.sh https://raw.githubusercontent.com/amastelek/sdwantools/refs/heads/main/net_sla_monitor.sh
         sudo chmod +x /usr/local/sbin/net_sla_monitor.sh
         ;;
+      lan_monitor.sh)
+        echo "→ Downloading lan_monitor.sh to /usr/local/sbin"
+        sudo curl -L -o /usr/local/sbin/lan_monitor.sh https://raw.githubusercontent.com/amastelek/sdwantools/refs/heads/main/lan_monitor.sh
+        sudo chmod +x /usr/local/sbin/lan_monitor.sh
+        ;;
     esac
   done
 
@@ -113,6 +119,7 @@ if [[ ${#missing[@]} -gt 0 && "$is_opensuse_156" == true ]]; then
   [[ ! -x /usr/local/sbin/listneighbours.sh ]] && missing+=("listneighbours.sh")
   [[ ! -x /usr/local/sbin/asn ]] && missing+=("asn")
   [[ ! -x /usr/local/sbin/net_sla_monitor.sh ]] && missing+=("net_sla_monitor.sh")
+  [[ ! -x /usr/local/sbin/lan_monitor.sh ]] && missing+=("lan_monitor.sh")
   [[ ! -x /usr/local/sbin/prettyping ]] && missing+=("prettyping")
 fi
 
@@ -241,6 +248,7 @@ do_reports_submenu() {
       "sla"            "SLA ping report (query=sla)" \
       "speedtest_hist" "Speedtest history (query=speedtest)" \
       "net_sla"        "Network SLA monitor report" \
+      "lan_mon"        "LAN monitor report" \
       "Back"           "Return to main menu" \
       3>&1 1>&2 2>&3)
 
@@ -426,6 +434,15 @@ do_reports_submenu() {
         echo "=== Network SLA Monitor Report ==="
         echo "================================="
         /usr/local/sbin/net_sla_monitor.sh query
+        echo
+        echo "Press Enter to return..."
+        read -r
+        ;;
+      lan_mon)
+        clear
+        echo "=== LAN Monitor Report ==="
+        echo "========================="
+        /usr/local/sbin/lan_monitor.sh query
         echo
         echo "Press Enter to return..."
         read -r
