@@ -28,7 +28,7 @@ SNAPSHOT="${DATA_DIR}/last_scan.json"
 VENDOR_CACHE="${DATA_DIR}/vendor_cache.tsv"   # mac_prefix<TAB>vendor
 PING_COUNT=2
 PING_TIMEOUT=2
-TOP_PORTS=100         # nmap: how many top ports to probe per host
+TOP_PORTS=1000        # nmap: how many top ports to probe per host
 NMAP_TIMING="-T4"     # nmap timing template
 MAX_CVE_DETAILS=3     # number of top CVEs to show descriptions for per host
 
@@ -381,6 +381,23 @@ show_dashboard() {
         done | sort | awk -F'\t' '{print $2}'
     )
 
+    # ── Pre-pass: accumulate port counts and vulnerable host tally ───────────
+    declare -A port_count
+    local vuln_host_count=0
+    for (( pi=0; pi<total; pi++ )); do
+        local pp="${d_ports[$pi]:-}"
+        for token in $pp; do
+            [[ "$token" =~ ^[0-9]+/ ]] || continue
+            port_count[$token]=$(( ${port_count[$token]:-0} + 1 ))
+        done
+        local cr="${d_cves[$pi]:-}"
+        if [[ "$cr" != "no CVEs found" && \
+              "$cr" != "vulners script unavailable" && \
+              -n "$cr" ]]; then
+            vuln_host_count=$(( vuln_host_count + 1 ))
+        fi
+    done
+
     # ── Draw ──────────────────────────────────────────────────────────────────
     local tw
     tw=$(tput cols 2>/dev/null || echo 140)
@@ -497,6 +514,59 @@ show_dashboard() {
             done
         fi
     done
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    printf "${C}"; printf '═%.0s' $(seq 1 "$tw"); printf "${RST}\n"
+    printf "${BLD}${C} SUMMARY${RST}\n"
+    printf "${C}"; printf '─%.0s' $(seq 1 "$tw"); printf "${RST}\n"
+
+    # Vulnerability headline
+    if [[ $vuln_host_count -gt 0 ]]; then
+        printf "  ${BLD}Hosts with vulnerabilities:${RST} ${R}${BLD}%d${RST} of ${C}%d${RST}\n" \
+            "$vuln_host_count" "$total"
+    else
+        printf "  ${BLD}Hosts with vulnerabilities:${RST} ${G}0${RST} of ${C}%d${RST}  ${G}(none detected)${RST}\n" \
+            "$total"
+    fi
+
+    printf "${C}"; printf '─%.0s' $(seq 1 "$tw"); printf "${RST}\n"
+
+    # Open port breakdown — sort by port number numerically
+    if [[ ${#port_count[@]} -eq 0 ]]; then
+        printf "  ${DIM}No open ports detected across any host.${RST}\n"
+    else
+        printf "  ${BLD}%-30s  %s  %s${RST}\n" "PORT / PROTOCOL (SERVICE)" "HOSTS" "BAR"
+        printf "  ${DIM}%-30s  %-5s  %s${RST}\n" "─────────────────────────────" "─────" "──────────────────────────────"
+
+        # Sort tokens by port number
+        local -a sorted_tokens=()
+        while IFS= read -r tok; do
+            sorted_tokens+=("$tok")
+        done < <(
+            for tok in "${!port_count[@]}"; do
+                local pnum
+                pnum=$(echo "$tok" | grep -oP '^\d+')
+                printf "%05d\t%s\n" "$pnum" "$tok"
+            done | sort -n | awk -F'\t' '{print $2}'
+        )
+
+        for tok in "${sorted_tokens[@]}"; do
+            local cnt="${port_count[$tok]}"
+            # Colour by count relative to total hosts
+            local bar_col="${G}"
+            if awk "BEGIN{exit !(${cnt}/${total} >= 0.75)}" 2>/dev/null; then
+                bar_col="${R}"
+            elif awk "BEGIN{exit !(${cnt}/${total} >= 0.40)}" 2>/dev/null; then
+                bar_col="${Y}"
+            fi
+            # Bar: one block per host, max 40 wide
+            local bar_len=$(( cnt > 40 ? 40 : cnt ))
+            local bar
+            bar=$(printf '█%.0s' $(seq 1 "$bar_len"))
+            printf "  %-30s  ${bar_col}%-5s${RST}  ${bar_col}%s${RST}\n" \
+                "$tok" "$cnt" "$bar"
+        done
+    fi
 
     printf "${C}"; printf '═%.0s' $(seq 1 "$tw"); printf "${RST}\n"
     printf "  ${DIM}Snapshot: ${SNAPSHOT}${RST}\n"
