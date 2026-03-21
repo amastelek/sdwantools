@@ -265,6 +265,25 @@ show_dashboard() {
         fi
     done
 
+    # ── Load dnsmasq leases (optional) ───────────────────────────────────────
+    local LEASES_FILE="/var/run/dnsmasq/dnsmasq.leases"
+    # Also check the bonding path mentioned by the user
+    [[ ! -f "$LEASES_FILE" ]] && LEASES_FILE="/var/run/bonding/dnsmasq.leases"
+    declare -A lease_name
+    local has_leases=0
+    if [[ -f "$LEASES_FILE" ]]; then
+        has_leases=1
+        while IFS= read -r lline; do
+            [[ -z "$lline" ]] && continue
+            local l_mac l_name
+            l_mac=$(echo "$lline"  | awk '{print tolower($2)}')
+            l_name=$(echo "$lline" | awk '{print $4}')
+            # Skip wildcard entries
+            [[ "$l_name" == "*" ]] && l_name=""
+            [[ -n "$l_mac" && -n "$l_name" ]] && lease_name[$l_mac]="$l_name"
+        done < "$LEASES_FILE"
+    fi
+
     # ── Draw ──────────────────────────────────────────────────────────────────
     clear
 
@@ -283,8 +302,13 @@ show_dashboard() {
     printf "${C}"; printf '─%.0s' $(seq 1 "$tw"); printf "${RST}\n"
 
     # Column headers
-    printf "  ${DIM}${BLD}%-16s  %-17s  %-22s  %-16s  %-10s  %-9s${RST}\n" \
-        "IP ADDRESS" "MAC ADDRESS" "VENDOR" "FIRST SEEN" "LATENCY" "STATUS"
+    if [[ $has_leases -eq 1 ]]; then
+        printf "  ${DIM}${BLD}%-16s  %-17s  %-22s  %-20s  %-16s  %-10s  %-9s${RST}\n" \
+            "IP ADDRESS" "MAC ADDRESS" "VENDOR" "NAME" "FIRST SEEN" "LATENCY" "STATUS"
+    else
+        printf "  ${DIM}${BLD}%-16s  %-17s  %-22s  %-16s  %-10s  %-9s${RST}\n" \
+            "IP ADDRESS" "MAC ADDRESS" "VENDOR" "FIRST SEEN" "LATENCY" "STATUS"
+    fi
 
     printf "${C}"; printf '─%.0s' $(seq 1 "$tw"); printf "${RST}\n"
 
@@ -321,11 +345,23 @@ show_dashboard() {
             status_colour="${R}"
         fi
 
+        # DHCP name lookup (normalise MAC to lowercase for key match)
+        local mac_lower
+        mac_lower=$(echo "$mac" | tr '[:upper:]' '[:lower:]')
+        local hostname="${lease_name[$mac_lower]:-}"
+
         # Info line — all widths are plain-text widths, colour injected inline
-        printf "  ${C}%-16s${RST}  ${DIM}%-17s${RST}  %-22s  ${DIM}%-16s${RST}  %s%-10s${RST}  %s%s${RST}\n" \
-            "$ip" "$mac" "$vendor" "$first" \
-            "$lat_colour" "$lat_plain" \
-            "$status_colour" "$status_plain"
+        if [[ $has_leases -eq 1 ]]; then
+            printf "  ${C}%-16s${RST}  ${DIM}%-17s${RST}  %-22s  ${Y}%-20s${RST}  ${DIM}%-16s${RST}  %s%-10s${RST}  %s%s${RST}\n" \
+                "$ip" "$mac" "$vendor" "${hostname:--}" "$first" \
+                "$lat_colour" "$lat_plain" \
+                "$status_colour" "$status_plain"
+        else
+            printf "  ${C}%-16s${RST}  ${DIM}%-17s${RST}  %-22s  ${DIM}%-16s${RST}  %s%-10s${RST}  %s%s${RST}\n" \
+                "$ip" "$mac" "$vendor" "$first" \
+                "$lat_colour" "$lat_plain" \
+                "$status_colour" "$status_plain"
+        fi
 
         # Presence bar — own line, indented, exactly 24 blocks (one per hour)
         # Green=pingable  Amber=in table/no ping  Red=absent when scan ran  Grey=no scan
