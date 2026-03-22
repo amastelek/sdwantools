@@ -15,7 +15,7 @@
 #
 # Dependencies: ip, ping, curl, awk, sed, date, nmap, snmpget, snmpwalk
 #   Debian/Ubuntu : sudo apt-get install -y nmap snmp iproute2 curl
-#   openSUSE      : sudo zypper install -y nmap net-snmp net-snmp-utils iproute2 curl
+#   openSUSE      : sudo zypper install -y nmap net-snmp iproute2 curl
 # =============================================================================
 
 set -uo pipefail
@@ -108,8 +108,8 @@ check_deps() {
     detect_distro
     declare -A PKG_MAP=(
         [nmap]="nmap:nmap"
-        [snmpget]="snmp:net-snmp net-snmp-utils"
-        [snmpwalk]="snmp:net-snmp net-snmp-utils"
+        [snmpget]="snmp:net-snmp"
+        [snmpwalk]="snmp:net-snmp"
         [ip]="iproute2:iproute2"
         [curl]="curl:curl"
         [ping]="iputils-ping:iputils"
@@ -1333,7 +1333,7 @@ ${BLD}Dashboard sections:${RST}
 ${BLD}Dependencies:${RST}
   Missing packages installed automatically on first run.
   Debian/Ubuntu : apt-get install -y nmap snmp iproute2 curl
-  openSUSE      : zypper install -y nmap net-snmp net-snmp-utils iproute2 curl
+  openSUSE      : zypper install -y nmap net-snmp iproute2 curl
 
 ${BLD}Cron:${RST}
   0 2 * * * /usr/local/sbin/netman_monitor.sh >> /var/log/netman_monitor.log 2>&1
