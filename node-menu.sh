@@ -17,6 +17,15 @@ if [[ -f /etc/os-release ]]; then
 fi
 
 # ------------------------------------------------
+# Migrate asn from /usr/local/bin to /usr/local/sbin if needed
+# ------------------------------------------------
+if [[ -x /usr/local/bin/asn && ! -x /usr/local/sbin/asn ]]; then
+  echo "→ Migrating asn from /usr/local/bin to /usr/local/sbin"
+  sudo mv /usr/local/bin/asn /usr/local/sbin/asn
+  sudo chmod 755 /usr/local/sbin/asn
+fi
+
+# ------------------------------------------------
 # Dependency check + auto-install (openSUSE 15.6 / Debian Buster)
 # ------------------------------------------------
 missing=()
