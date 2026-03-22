@@ -16,6 +16,8 @@ OUI_DB="${DATA_DIR}/oui.txt"
 PING_COUNT=3
 PING_TIMEOUT=2
 MAX_AGE_HOURS=24
+# Subnets to exclude from scanning and display (CIDR, space-separated)
+EXCLUDED_NETS="45.222.22.0/24"
 
 mkdir -p "${DATA_DIR}"
 
@@ -46,7 +48,30 @@ check_deps() {
     fi
 }
 
-# ── OUI vendor lookup ─────────────────────────────────────────────────────────
+# ── Subnet exclusion check ────────────────────────────────────────────────────
+# Returns 0 (true) if the IP falls within any EXCLUDED_NETS entry
+ip_is_excluded() {
+    local ip="$1"
+    local net
+    for net in ${EXCLUDED_NETS}; do
+        local net_addr="${net%/*}"
+        local prefix="${net#*/}"
+        if awk -F. -v ip="$ip" -v na="$net_addr" -v p="$prefix" '
+            BEGIN {
+                split(ip, a, ".")
+                split(na, b, ".")
+                ip_int  = a[1]*16777216 + a[2]*65536 + a[3]*256 + a[4]
+                net_int = b[1]*16777216 + b[2]*65536 + b[3]*256 + b[4]
+                mask    = (p==0) ? 0 : (2^32 - 2^(32-p))
+                exit !( int(ip_int/2^(32-p)) == int(net_int/2^(32-p)) )
+            }' /dev/null 2>/dev/null; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+
 update_oui_db() {
     if [[ ! -f "${OUI_DB}" ]] || \
        [[ $(find "${OUI_DB}" -mtime +30 2>/dev/null | wc -l) -gt 0 ]]; then
@@ -126,6 +151,9 @@ run_scan() {
         # Skip IPv6 — their address field always contains ':'
         [[ "$ip" == *:* ]] && continue
 
+        # Skip excluded subnets
+        ip_is_excluded "$ip" && continue
+
         # Skip lines with no lladdr (FAILED / INCOMPLETE)
         echo "$line" | grep -q 'lladdr' || continue
 
@@ -176,66 +204,118 @@ show_dashboard() {
     # Track every hour-slot in which a scan ran
     local scanned_slots=","
 
-    local header=1
-    while IFS= read -r csvline; do
-        [[ $header -eq 1 ]] && { header=0; continue; }
-        [[ -z "$csvline" ]] && continue
+    # ── Parse CSV in a single awk pass ───────────────────────────────────────
+    # awk does all field extraction, timestamp→epoch conversion, and slot math.
+    # Output format per host (tab-separated, one line each field type):
+    #   H <key> <vendor> <first_ts> <last_ts> <last_ping> <last_lat>
+    #   S <key> <slot>   (seen/pingable)
+    #   U <key> <slot>   (unseen/in-table-no-ping)
+    #   P <key> <slot>   (present in table)
+    #   T <slot>         (scan ran this slot)
+    local awk_tmp
+    awk_tmp=$(mktemp)
 
-        # Parse CSV manually to handle quoted vendor field
-        # Format: timestamp,ip,mac,"vendor",pingable,latency
-        local ts ip mac vendor pingable latency
-        ts=$(echo "$csvline"      | awk -F',' '{print $1}')
-        ip=$(echo "$csvline"      | awk -F',' '{print $2}')
-        mac=$(echo "$csvline"     | awk -F',' '{print $3}')
-        vendor=$(echo "$csvline"  | awk -F'"' '{print $2}')
-        pingable=$(echo "$csvline" | awk -F'"' '{print $3}' | awk -F',' '{print $2}')
-        latency=$(echo "$csvline"  | awk -F'"' '{print $3}' | awk -F',' '{print $3}')
+    awk -v now_epoch="$now_epoch" -v excluded="${EXCLUDED_NETS}" '
+    function ip_excluded(ip,    n,parts,net,cidr,net_addr,prefix,ip_int,net_int,i,a,b) {
+        n = split(excluded, parts, " ")
+        for (i=1; i<=n; i++) {
+            split(parts[i], cidr, "/")
+            net_addr = cidr[1]; prefix = cidr[2]+0
+            split(ip,      a, "."); ip_int  = a[1]*16777216+a[2]*65536+a[3]*256+a[4]
+            split(net_addr,b, "."); net_int = b[1]*16777216+b[2]*65536+b[3]*256+b[4]
+            if (prefix == 0) return 1
+            shift = 32 - prefix
+            if (int(ip_int / 2^shift) == int(net_int / 2^shift)) return 1
+        }
+        return 0
+    }
+    function ts_to_epoch(ts,    cmd,ep) {
+        cmd = "date -d \""ts"\" +%s 2>/dev/null"
+        cmd | getline ep
+        close(cmd)
+        return ep+0
+    }
+    NR==1 { next }   # skip header
+    {
+        # Parse quoted vendor: timestamp,ip,mac,"vendor",pingable,latency
+        ts      = $0; sub(/,.*/, "", ts)
+        rest    = $0; sub(/^[^,]*,/, "", rest)
+        ip      = rest; sub(/,.*/, "", ip)
+        rest2   = rest; sub(/^[^,]*,/, "", rest2)
+        mac     = rest2; sub(/,.*/, "", mac)
+        # vendor is between first pair of quotes
+        vendor  = $0; sub(/^[^"]*"/, "", vendor); sub(/".*/, "", vendor)
+        # after closing quote: ,pingable,latency
+        tail    = $0; sub(/^[^"]*"[^"]*",/, "", tail)
+        pingable = tail; sub(/,.*/, "", pingable)
+        latency  = tail; sub(/^[^,]*,/, "", latency)
 
-        [[ -z "$ip" || -z "$mac" ]] && continue
+        if (ip == "" || mac == "") next
+        if (ip ~ /:/) next                  # skip IPv6
+        if (ip_excluded(ip)) next           # skip excluded subnets
 
-        # Map timestamp → hourly slot (0 = current hour, 23 = 23h ago)
-        local ts_epoch
-        ts_epoch=$(date -d "$ts" '+%s' 2>/dev/null) || continue
-        local diff_h=$(( (now_epoch - ts_epoch) / 3600 ))
-        [[ $diff_h -lt 0 || $diff_h -ge 24 ]] && continue
+        ts_epoch = ts_to_epoch(ts)
+        if (ts_epoch == 0) next
+        diff_h = int((now_epoch - ts_epoch) / 3600)
+        if (diff_h < 0 || diff_h >= 24) next
 
-        # Record that a scan ran in this slot
-        [[ "$scanned_slots" != *",${diff_h},"* ]] && scanned_slots+=",${diff_h},"
+        key = ip "|" mac
 
-        local key="${ip}|${mac}"
+        # Track scan slot
+        if (!scanned[diff_h]++) print "T\t" diff_h
 
-        # Register host on first encounter
-        if [[ -z "${h_vendor[$key]+x}" ]]; then
-            h_vendor[$key]="$vendor"
-            h_first[$key]="$ts"
-            h_last_ts[$key]="$ts"
-            h_last_ping[$key]="$pingable"
-            h_last_lat[$key]="$latency"
-            h_seen_slots[$key]=","
-            h_unseen_slots[$key]=","
-            h_present_slots[$key]=","
-        fi
+        # Host record
+        if (!(key in first_ts)) {
+            first_ts[key] = ts
+            last_ts[key]  = ts
+            h_vendor[key] = vendor
+            h_ping[key]   = pingable
+            h_lat[key]    = latency
+        }
+        if (ts > last_ts[key]) {
+            last_ts[key] = ts
+            h_ping[key]  = pingable
+            h_lat[key]   = latency
+        }
+        if (!seen_h[key,diff_h]++) {
+            print "H\t" key "\t" vendor "\t" first_ts[key] "\t" ts "\t" pingable "\t" latency
+            print "P\t" key "\t" diff_h
+            if (pingable == "yes") print "S\t" key "\t" diff_h
+            else                   print "U\t" key "\t" diff_h
+        }
+    }
+    ' "${CSV_FILE}" > "$awk_tmp"
 
-        # Track most recent record
-        if [[ "$ts" > "${h_last_ts[$key]}" ]]; then
-            h_last_ts[$key]="$ts"
-            h_last_ping[$key]="$pingable"
-            h_last_lat[$key]="$latency"
-        fi
+    # ── Load awk output into bash arrays ─────────────────────────────────────
+    declare -A h_vendor h_first h_last_ts h_last_ping h_last_lat
+    declare -A h_seen_slots h_unseen_slots h_present_slots
+    local scanned_slots=","
 
-        # Record this host was present in the neighbor table this slot
-        [[ "${h_present_slots[$key]}" != *",${diff_h},"* ]] && \
-            h_present_slots[$key]+="${diff_h},"
-
-        if [[ "$pingable" == "yes" ]]; then
-            [[ "${h_seen_slots[$key]}" != *",${diff_h},"* ]] && \
-                h_seen_slots[$key]+="${diff_h},"
-        else
-            [[ "${h_unseen_slots[$key]}" != *",${diff_h},"* ]] && \
-                h_unseen_slots[$key]+="${diff_h},"
-        fi
-
-    done < "${CSV_FILE}"
+    while IFS=$'\t' read -r rec_type f1 f2 f3 f4 f5 f6; do
+        case "$rec_type" in
+            T) [[ "$scanned_slots" != *",${f1},"* ]] && scanned_slots+=",${f1}," ;;
+            H) local key="$f1"
+               if [[ -z "${h_vendor[$key]+x}" ]]; then
+                   h_vendor[$key]="$f2"
+                   h_first[$key]="$f3"
+                   h_last_ts[$key]="$f4"
+                   h_last_ping[$key]="$f5"
+                   h_last_lat[$key]="$f6"
+                   h_seen_slots[$key]=","
+                   h_unseen_slots[$key]=","
+                   h_present_slots[$key]=","
+               fi
+               if [[ "$f4" > "${h_last_ts[$key]}" ]]; then
+                   h_last_ts[$key]="$f4"
+                   h_last_ping[$key]="$f5"
+                   h_last_lat[$key]="$f6"
+               fi ;;
+            S) h_seen_slots[$f1]+="${f2}," ;;
+            U) h_unseen_slots[$f1]+="${f2}," ;;
+            P) h_present_slots[$f1]+="${f2}," ;;
+        esac
+    done < "$awk_tmp"
+    rm -f "$awk_tmp"
 
     # ── Term width ────────────────────────────────────────────────────────────
     local tw
@@ -321,16 +401,18 @@ show_dashboard() {
         local lat="${h_last_lat[$key]:-}"
         local pingable="${h_last_ping[$key]}"
 
-        # Latency — fixed 10-char visible field, colour applied around it
+        # Latency — fixed 10-char visible field, colour via bash arithmetic (no awk fork)
         local lat_plain lat_colour
         if [[ -z "$lat" ]]; then
             lat_plain="-"
             lat_colour="${DIM}"
         else
             lat_plain="${lat}"
-            local lat_num="${lat%ms}"
-            if awk "BEGIN{exit !($lat_num < 5)}"   2>/dev/null; then lat_colour="${G}"
-            elif awk "BEGIN{exit !($lat_num < 50)}" 2>/dev/null; then lat_colour="${Y}"
+            # Strip 'ms', keep integer part for comparison
+            local lat_int="${lat%.*}"
+            lat_int="${lat_int%ms}"
+            if   [[ "$lat_int" -lt 5  ]] 2>/dev/null; then lat_colour="${G}"
+            elif [[ "$lat_int" -lt 50 ]] 2>/dev/null; then lat_colour="${Y}"
             else lat_colour="${R}"
             fi
         fi
