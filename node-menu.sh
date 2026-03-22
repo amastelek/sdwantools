@@ -136,11 +136,16 @@ if [[ ${#missing[@]} -gt 0 && "$is_debian_buster" == true ]]; then
         sudo apt install -y whiptail
         ;;
       trip)
-        echo "→ Installing trippy 0.13.0 (.deb)"
+        echo "→ Installing trippy 0.13.0 musl (.deb)"
         cd /tmp
-        wget -q https://github.com/fujiapple852/trippy/releases/download/0.13.0/trippy_x86_64-unknown-linux-gnu_0.13.0_amd64.deb
-        sudo dpkg -i trippy_*_amd64.deb
-        rm -f /tmp/trippy_*_amd64.deb
+        wget -q https://github.com/fujiapple852/trippy/releases/download/0.13.0/trippy_x86_64-unknown-linux-musl_0.13.0_amd64.deb
+        sudo dpkg -i trippy_x86_64-unknown-linux-musl_0.13.0_amd64.deb
+        rm -f /tmp/trippy_x86_64-unknown-linux-musl_0.13.0_amd64.deb
+        ;;
+      ping_sla.sh)
+        echo "→ Downloading ping_sla.sh to /usr/local/sbin"
+        sudo curl -L -o /usr/local/sbin/ping_sla.sh https://raw.githubusercontent.com/amastelek/sdwantools/refs/heads/main/ping_sla.sh
+        sudo chmod +x /usr/local/sbin/ping_sla.sh
         ;;
       prettyping)
         echo "→ Downloading prettyping to /usr/local/sbin"
