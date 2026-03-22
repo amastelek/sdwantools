@@ -173,7 +173,7 @@ if [[ ${#missing[@]} -gt 0 && "$is_debian_buster" == true ]]; then
         ;;
       asn)
         echo "→ Installing asn prerequisites"
-        sudo apt install -y jq whois ipcalc ncat aha
+        sudo apt install -y jq whois ipcalc ncat aha nmap
         echo "→ Downloading asn to /usr/local/sbin"
         sudo curl -o /usr/local/sbin/asn https://raw.githubusercontent.com/nitefood/asn/master/asn
         sudo chmod 755 /usr/local/sbin/asn
