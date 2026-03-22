@@ -1,21 +1,23 @@
 #!/usr/bin/env bash
 # ================================================
-# Node Tools Menu - node-menu.sh (auto-install on openSUSE Leap 15.6)
+# Node Tools Menu - node-menu.sh (auto-install on openSUSE Leap 15.6 / Debian Buster)
 # ================================================
 
 BASTION_CONF="/usr/local/sbin/bastion.conf"
 
 # ------------------------------------------------
-# Detect openSUSE Leap 15.6
+# Detect OS
 # ------------------------------------------------
 is_opensuse_156=false
+is_debian_buster=false
 if [[ -f /etc/os-release ]]; then
   . /etc/os-release 2>/dev/null
   [[ "$ID" == "opensuse-leap" && "$VERSION_ID" == "15.6" ]] && is_opensuse_156=true
+  [[ "$ID" == "debian" && "$VERSION_CODENAME" == "buster" ]] && is_debian_buster=true
 fi
 
 # ------------------------------------------------
-# Dependency check + auto-install on openSUSE 15.6
+# Dependency check + auto-install (openSUSE 15.6 / Debian Buster)
 # ------------------------------------------------
 missing=()
 for cmd in whiptail btop speedtest trip tuptime vnstat nmap; do
@@ -95,6 +97,70 @@ if [[ ${#missing[@]} -gt 0 && "$is_opensuse_156" == true ]]; then
         echo "→ Downloading asn to /usr/local/sbin"
         sudo curl -o /usr/local/sbin/asn https://raw.githubusercontent.com/nitefood/asn/master/asn
         sudo chmod 755 /usr/local/sbin/asn
+        ;;
+      net_sla_monitor.sh)
+        echo "→ Downloading net_sla_monitor.sh to /usr/local/sbin"
+        sudo curl -L -o /usr/local/sbin/net_sla_monitor.sh https://raw.githubusercontent.com/amastelek/sdwantools/refs/heads/main/net_sla_monitor.sh
+        sudo chmod +x /usr/local/sbin/net_sla_monitor.sh
+        ;;
+      lan_monitor.sh)
+        echo "→ Downloading lan_monitor.sh to /usr/local/sbin"
+        sudo curl -L -o /usr/local/sbin/lan_monitor.sh https://raw.githubusercontent.com/amastelek/sdwantools/refs/heads/main/lan_monitor.sh
+        sudo chmod +x /usr/local/sbin/lan_monitor.sh
+        ;;
+    esac
+  done
+
+  # Re-check after installation
+  missing=()
+  for cmd in whiptail btop speedtest trip tuptime vnstat nmap; do
+    command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+  done
+  [[ ! -x /usr/local/sbin/ping_sla.sh ]] && missing+=("ping_sla.sh")
+  [[ ! -x /usr/local/sbin/ping_speedtest.sh ]] && missing+=("ping_speedtest.sh")
+  [[ ! -x /usr/local/sbin/listneighbours.sh ]] && missing+=("listneighbours.sh")
+  [[ ! -x /usr/local/sbin/asn ]] && missing+=("asn")
+  [[ ! -x /usr/local/sbin/net_sla_monitor.sh ]] && missing+=("net_sla_monitor.sh")
+  [[ ! -x /usr/local/sbin/lan_monitor.sh ]] && missing+=("lan_monitor.sh")
+  [[ ! -x /usr/local/sbin/prettyping ]] && missing+=("prettyping")
+fi
+
+if [[ ${#missing[@]} -gt 0 && "$is_debian_buster" == true ]]; then
+  echo "=== Debian Buster detected ==="
+  echo "Auto-installing missing dependencies..."
+
+  for dep in "${missing[@]}"; do
+    case "$dep" in
+      whiptail)
+        echo "→ Installing whiptail"
+        sudo apt install -y whiptail
+        ;;
+      trip)
+        echo "→ Installing trippy 0.13.0 (.deb)"
+        cd /tmp
+        wget -q https://github.com/fujiapple852/trippy/releases/download/0.13.0/trippy_x86_64-unknown-linux-gnu_0.13.0_amd64.deb
+        sudo dpkg -i trippy_*_amd64.deb
+        rm -f /tmp/trippy_*_amd64.deb
+        ;;
+      prettyping)
+        echo "→ Downloading prettyping to /usr/local/sbin"
+        sudo curl -L -o /usr/local/sbin/prettyping https://raw.githubusercontent.com/denilsonsa/prettyping/master/prettyping
+        sudo chmod +x /usr/local/sbin/prettyping
+        ;;
+      ping_speedtest.sh)
+        echo "→ Downloading ping_speedtest.sh to /usr/local/sbin"
+        sudo curl -L -o /usr/local/sbin/ping_speedtest.sh https://raw.githubusercontent.com/amastelek/sdwantools/refs/heads/main/ping_speedtest.sh
+        sudo chmod +x /usr/local/sbin/ping_speedtest.sh
+        ;;
+      listneighbours.sh)
+        echo "→ Downloading listneighbours.sh to /usr/local/sbin"
+        sudo curl -L -o /usr/local/sbin/listneighbours.sh https://raw.githubusercontent.com/amastelek/sdwantools/refs/heads/main/listneighbours.sh
+        sudo chmod +x /usr/local/sbin/listneighbours.sh
+        ;;
+      asn)
+        echo "→ Downloading asn to /usr/local/bin"
+        sudo curl -o /usr/local/bin/asn https://raw.githubusercontent.com/nitefood/asn/master/asn
+        sudo chmod +x /usr/local/bin/asn
         ;;
       net_sla_monitor.sh)
         echo "→ Downloading net_sla_monitor.sh to /usr/local/sbin"
