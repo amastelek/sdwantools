@@ -163,9 +163,9 @@ if [[ ${#missing[@]} -gt 0 && "$is_debian_buster" == true ]]; then
         sudo chmod +x /usr/local/sbin/listneighbours.sh
         ;;
       asn)
-        echo "→ Downloading asn to /usr/local/bin"
-        sudo curl -o /usr/local/bin/asn https://raw.githubusercontent.com/nitefood/asn/master/asn
-        sudo chmod +x /usr/local/bin/asn
+        echo "→ Downloading asn to /usr/local/sbin"
+        sudo curl -o /usr/local/sbin/asn https://raw.githubusercontent.com/nitefood/asn/master/asn
+        sudo chmod 755 /usr/local/sbin/asn
         ;;
       net_sla_monitor.sh)
         echo "→ Downloading net_sla_monitor.sh to /usr/local/sbin"
