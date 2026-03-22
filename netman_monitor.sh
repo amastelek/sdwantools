@@ -63,6 +63,11 @@ SNMP_COMMUNITIES=(
     "12345"
 )
 
+# IP ranges to skip entirely — CIDR notation (e.g. 192.168.1.0/24) or single IPs
+IGNORE_NETWORKS=(
+    "45.222.22.0/24"
+)
+
 # Populated at runtime by parse_args
 FAST_SCAN=0
 
@@ -81,6 +86,48 @@ detect_distro() {
             *suse*|*opensuse*)  DISTRO_FAMILY="suse"   ;;
         esac
     fi
+}
+
+# ── Ignore list check ────────────────────────────────────────────────────────
+# Returns 0 (skip this IP) or 1 (process it).
+# Supports individual IPs and CIDR notation (/8 through /32).
+ip_ignored() {
+    local ip="$1"
+
+    # Convert dotted IP to 32-bit integer
+    ip_to_int() {
+        local a b c d
+        IFS='.' read -r a b c d <<< "$1"
+        printf '%d' $(( (a<<24) | (b<<16) | (c<<8) | d ))
+    }
+
+    local ip_int
+    ip_int=$(ip_to_int "$ip") || return 1
+
+    local entry
+    for entry in "${IGNORE_NETWORKS[@]}"; do
+        [[ -z "$entry" ]] && continue
+        if [[ "$entry" == */* ]]; then
+            # CIDR block
+            local net="${entry%/*}"
+            local bits="${entry#*/}"
+            [[ "$bits" =~ ^[0-9]+$ ]] || continue
+            local net_int mask net_masked ip_masked
+            net_int=$(ip_to_int "$net") || continue
+            if [[ "$bits" -eq 0 ]]; then
+                mask=0
+            else
+                mask=$(( 0xFFFFFFFF << (32 - bits) & 0xFFFFFFFF ))
+            fi
+            net_masked=$(( net_int & mask ))
+            ip_masked=$(( ip_int  & mask ))
+            [[ $net_masked -eq $ip_masked ]] && return 0
+        else
+            # Single IP
+            [[ "$ip" == "$entry" ]] && return 0
+        fi
+    done
+    return 1
 }
 
 # ── Terminal colours ──────────────────────────────────────────────────────────
@@ -488,64 +535,93 @@ get_port_status() {
     printf '%s' "$result"
 }
 
-# ── Printer detection + ink/cartridge/tray status ────────────────────────────
-# Detects printer via prtGeneralPrinterStatus (raw OID 1.3.6.1.2.1.43.5.1.1.15.1)
-# Uses direct numeric OIDs from Printer-MIB as per RFC 3805.
+# ── Printer detection + ink/cartridge/tray/cover status ─────────────────────
+# Detection strategy (handles both Canon and HP):
+#   1. Try prtGeneralPrinterStatus walk (.1.3.6.1.2.1.43.5.1.1.15)
+#   2. If that fails, try supply walk (.1.3.6.1.2.1.43.11.1.1.6) as fallback
+#      — HP often skips prtGeneralPrinterStatus but always has supplies
+#   Returns empty string if neither walk yields Printer-MIB data.
 #
-# Tray levels:  1.3.6.1.2.1.43.8.2.1.10.1.x  (prtInputCurrentLevel, x=1..N)
-# Supply level: 1.3.6.1.2.1.43.11.1.1.9.1.x  (prtMarkerSuppliesLevel)
-# Supply max:   1.3.6.1.2.1.43.11.1.1.8.1.x  (prtMarkerSuppliesMaxCapacity)
-# Supply desc:  1.3.6.1.2.1.43.11.1.1.6.1.x  (prtMarkerSuppliesDescription)
-# Supply type:  1.3.6.1.2.1.43.11.1.1.4.1.x  (prtMarkerSuppliesType)
-# Tray desc:    1.3.6.1.2.1.43.8.2.1.13.1.x  (prtInputName)
+# Cover description: .1.3.6.1.2.1.43.6.1.1.2  (prtCoverDescription)
+# Cover status:      .1.3.6.1.2.1.43.6.1.1.3  (prtCoverStatus: 3=open 4=closed 0=N/A)
+# Tray level:        .1.3.6.1.2.1.43.8.2.1.10 (prtInputCurrentLevel; -2=uncountable/OK)
+# Tray name:         .1.3.6.1.2.1.43.8.2.1.13 (prtInputName)
 #
 # Returns empty string if device is not a printer.
-# Result format:  printer_status|S:idx~desc~level~max~type|...|T:idx~name~level
+# Result format: printer_status|S:idx~desc~level~max~type|...|T:idx~name~level|C:idx~name~status
 get_printer_info() {
     local ip="$1" community="$2" ver="$3"
 
     local snmp_args="-${ver} -c ${community} -t ${SNMP_TIMEOUT} -r ${SNMP_RETRIES} -On"
 
-    # ── Detect printer: probe prtGeneralPrinterStatus ─────────────────────────
-    # OID: .1.3.6.1.2.1.43.5.1.1.15.1  (hrDeviceIndex=1, standard starting point)
-    # Also try .1.3.6.1.2.1.43.5.1.1.15 walk to handle non-standard device indices
-    local pstatus_raw
+    # ── Step 1: attempt prtGeneralPrinterStatus (.43.5.1.1.15) ───────────────
+    # HP often leaves this empty — fall back to hrPrinterStatus if needed.
+    local pstatus_raw pstatus_str="unknown"
     pstatus_raw=$(snmpwalk ${snmp_args} "${ip}:${SNMP_PORT}" \
                            .1.3.6.1.2.1.43.5.1.1.15 2>/dev/null || true)
-    [[ -z "$pstatus_raw" ]] && printf '' && return
 
-    # Extract first status value — "INTEGER: idle(3)" → grab digit from parens
-    local pstatus_val
-    pstatus_val=$(printf '%s' "$pstatus_raw" | head -1 | \
-                  grep -o '([0-9]*)' | tr -d '()' | head -1)
-    [[ -z "$pstatus_val" ]] && \
+    local first_oid
+    first_oid=$(printf '%s' "$pstatus_raw" | head -1 | awk '{print $1}')
+    if printf '%s' "$first_oid" | grep -q '43\.5'; then
+        local pstatus_val
         pstatus_val=$(printf '%s' "$pstatus_raw" | head -1 | \
-                      awk -F':' '{print $NF}' | tr -d ' \r')
+                      grep -o '([0-9]*)' | tr -d '()' | head -1)
+        [[ -z "$pstatus_val" ]] && \
+            pstatus_val=$(printf '%s' "$pstatus_raw" | head -1 | \
+                          awk -F':' '{print $NF}' | tr -d ' \r')
+        case "${pstatus_val}" in
+            3) pstatus_str="idle"       ;;
+            4) pstatus_str="processing" ;;
+            5) pstatus_str="stopped"    ;;
+            *) pstatus_str="unknown"    ;;
+        esac
+    fi
 
-    local pstatus_str
-    case "${pstatus_val}" in
-        3) pstatus_str="idle"       ;;
-        4) pstatus_str="processing" ;;
-        5) pstatus_str="stopped"    ;;
-        *) pstatus_str="unknown(${pstatus_val})" ;;
-    esac
+    # ── Step 1b: HP fallback — hrPrinterStatus (.1.3.6.1.2.1.25.3.5.1.1) ─────
+    # hrPrinterStatus: 1=other 2=unknown 3=idle 4=printing 5=warmup
+    if [[ "$pstatus_str" == "unknown" ]]; then
+        local hrps_raw hrps_val
+        hrps_raw=$(snmpwalk ${snmp_args} "${ip}:${SNMP_PORT}" \
+                            .1.3.6.1.2.1.25.3.5.1.1 2>/dev/null || true)
+        hrps_val=$(printf '%s' "$hrps_raw" | head -1 | \
+                   grep -o '([0-9]*)' | tr -d '()' | head -1)
+        [[ -z "$hrps_val" ]] && \
+            hrps_val=$(printf '%s' "$hrps_raw" | head -1 | \
+                       awk -F':' '{print $NF}' | tr -d ' \r')
+        case "${hrps_val}" in
+            3) pstatus_str="idle"     ;;
+            4) pstatus_str="printing" ;;
+            5) pstatus_str="warmup"   ;;
+        esac
+    fi
 
-    # ── Supply ink/toner walks ────────────────────────────────────────────────
+    # ── Step 2: walk supply descriptions to confirm this is a printer ─────────
     local sdesc_raw slevel_raw smax_raw stype_raw
     sdesc_raw=$(snmpwalk  ${snmp_args} "${ip}:${SNMP_PORT}" .1.3.6.1.2.1.43.11.1.1.6  2>/dev/null || true)
+
+    [[ -z "$sdesc_raw" ]] && printf '' && return
+
+    local supply_oid
+    supply_oid=$(printf '%s' "$sdesc_raw" | head -1 | awk '{print $1}')
+    if ! printf '%s' "$supply_oid" | grep -q '43\.11'; then
+        printf '' && return
+    fi
+
+    # ── Step 3: fetch remaining supply and tray/cover data ───────────────────
     slevel_raw=$(snmpwalk ${snmp_args} "${ip}:${SNMP_PORT}" .1.3.6.1.2.1.43.11.1.1.9  2>/dev/null || true)
     smax_raw=$(snmpwalk   ${snmp_args} "${ip}:${SNMP_PORT}" .1.3.6.1.2.1.43.11.1.1.8  2>/dev/null || true)
     stype_raw=$(snmpwalk  ${snmp_args} "${ip}:${SNMP_PORT}" .1.3.6.1.2.1.43.11.1.1.4  2>/dev/null || true)
 
-    # ── Tray walks ────────────────────────────────────────────────────────────
     local tname_raw tlevel_raw
     tname_raw=$(snmpwalk  ${snmp_args} "${ip}:${SNMP_PORT}" .1.3.6.1.2.1.43.8.2.1.13 2>/dev/null || true)
     tlevel_raw=$(snmpwalk ${snmp_args} "${ip}:${SNMP_PORT}" .1.3.6.1.2.1.43.8.2.1.10 2>/dev/null || true)
 
+    # Cover data: description=.43.6.1.1.2  status=.43.6.1.1.3
+    local cdesc_raw cstatus_raw
+    cdesc_raw=$(snmpwalk   ${snmp_args} "${ip}:${SNMP_PORT}" .1.3.6.1.2.1.43.6.1.1.2 2>/dev/null || true)
+    cstatus_raw=$(snmpwalk ${snmp_args} "${ip}:${SNMP_PORT}" .1.3.6.1.2.1.43.6.1.1.3 2>/dev/null || true)
+
     # ── Parse supplies ────────────────────────────────────────────────────────
-    # Lines: .1.3.6.1.2.1.43.11.1.1.6.1.1 = STRING: "Black Toner"
-    #        .1.3.6.1.2.1.43.11.1.1.9.1.1 = INTEGER: 85
-    # Index is the LAST component of the OID.
     declare -A sdesc_map slevel_map smax_map stype_map
     local line oid idx val
 
@@ -561,7 +637,7 @@ get_printer_info() {
         [[ -z "$line" ]] && continue
         oid=$(printf '%s' "$line" | awk '{print $1}')
         idx=$(printf '%s' "$oid"  | awk -F'.' '{print $NF}')
-        val=$(printf '%s' "$line" | awk -F':' '{print $NF}' | tr -d ' \r')
+        val=$(printf '%s' "$line" | awk -F':' '{print $NF}' | sed 's/^[[:space:]]*//' | grep -o '^-\?[0-9]*'); val=${val:-0}
         [[ "$idx" =~ ^[0-9]+$ ]] && slevel_map["$idx"]="$val"
     done <<< "$slevel_raw"
 
@@ -569,7 +645,7 @@ get_printer_info() {
         [[ -z "$line" ]] && continue
         oid=$(printf '%s' "$line" | awk '{print $1}')
         idx=$(printf '%s' "$oid"  | awk -F'.' '{print $NF}')
-        val=$(printf '%s' "$line" | awk -F':' '{print $NF}' | tr -d ' \r')
+        val=$(printf '%s' "$line" | awk -F':' '{print $NF}' | sed 's/^[[:space:]]*//' | grep -o '^-\?[0-9]*'); val=${val:-0}
         [[ "$idx" =~ ^[0-9]+$ ]] && smax_map["$idx"]="$val"
     done <<< "$smax_raw"
 
@@ -577,11 +653,11 @@ get_printer_info() {
         [[ -z "$line" ]] && continue
         oid=$(printf '%s' "$line" | awk '{print $1}')
         idx=$(printf '%s' "$oid"  | awk -F'.' '{print $NF}')
-        val=$(printf '%s' "$line" | awk -F':' '{print $NF}' | tr -d ' \r')
-        # prtMarkerSuppliesType values come as "INTEGER: toner(3)" — grab digit from parens
+        val=$(printf '%s' "$line" | awk -F':' '{print $NF}' | sed 's/^[[:space:]]*//' | grep -o '^-\?[0-9]*')
         if [[ -z "$val" || ! "$val" =~ ^-?[0-9]+$ ]]; then
             val=$(printf '%s' "$line" | grep -o '([0-9]*)' | tr -d '()' | head -1)
         fi
+        val=${val:-0}
         [[ "$idx" =~ ^[0-9]+$ ]] && stype_map["$idx"]="$val"
     done <<< "$stype_raw"
 
@@ -599,9 +675,29 @@ get_printer_info() {
         [[ -z "$line" ]] && continue
         oid=$(printf '%s' "$line" | awk '{print $1}')
         idx=$(printf '%s' "$oid"  | awk -F'.' '{print $NF}')
-        val=$(printf '%s' "$line" | awk -F':' '{print $NF}' | tr -d ' \r')
+        val=$(printf '%s' "$line" | awk -F':' '{print $NF}' | sed 's/^[[:space:]]*//' | grep -o '^-\?[0-9]*'); val=${val:-0}
         [[ "$idx" =~ ^[0-9]+$ ]] && tlevel_map["$idx"]="$val"
     done <<< "$tlevel_raw"
+
+    # ── Parse covers/doors ────────────────────────────────────────────────────
+    declare -A cdesc_map cstatus_map
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        oid=$(printf '%s' "$line" | awk '{print $1}')
+        idx=$(printf '%s' "$oid"  | awk -F'.' '{print $NF}')
+        val=$(printf '%s' "$line" | sed 's/.*STRING: //' | tr -d '"\r')
+        [[ "$idx" =~ ^[0-9]+$ ]] && cdesc_map["$idx"]="$val"
+    done <<< "$cdesc_raw"
+
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        oid=$(printf '%s' "$line" | awk '{print $1}')
+        idx=$(printf '%s' "$oid"  | awk -F'.' '{print $NF}')
+        val=$(printf '%s' "$line" | grep -o '([0-9]*)' | tr -d '()' | head -1)
+        [[ -z "$val" ]] && val=$(printf '%s' "$line" | awk -F':' '{print $NF}' | sed 's/^[[:space:]]*//' | grep -o '^[0-9]*')
+        val=${val:-0}
+        [[ "$idx" =~ ^[0-9]+$ ]] && cstatus_map["$idx"]="$val"
+    done <<< "$cstatus_raw"
 
     # ── Build result string ───────────────────────────────────────────────────
     local result="${pstatus_str}"
@@ -627,6 +723,140 @@ get_printer_info() {
         local lv="${tlevel_map[$idx]:-0}"
         n=$(printf '%s' "$n" | tr '|~\t' '   ')
         result+="|T:${idx}~${n}~${lv}"
+    done <<< "$sorted_keys"
+
+    # Covers/doors (C: prefix) — only include if we have cover data
+    sorted_keys=$(printf '%s\n' "${!cdesc_map[@]}" | sort -n)
+    while IFS= read -r idx; do
+        [[ -z "$idx" ]] && continue
+        local cn="${cdesc_map[$idx]:-Cover${idx}}"
+        local cs="${cstatus_map[$idx]:-0}"
+        cn=$(printf '%s' "$cn" | tr '|~\t' '   ')
+        result+="|C:${idx}~${cn}~${cs}"
+    done <<< "$sorted_keys"
+
+    printf '%s' "$result"
+}
+
+# ── Host Resources (HOST-RESOURCES-MIB) ─────────────────────────────────────
+# Queries hrProcessorLoad, hrStorageTable (RAM + disks) when available.
+# Returns empty string if HOST-RESOURCES-MIB is not supported.
+#
+# Result format (pipe-separated):
+#   cpu_pct|M:desc~used~total~units|M:...|D:desc~used~total~units|D:...
+#   M: = memory/RAM entry   D: = disk/storage entry
+#   used and total are in allocation-units (multiply by units for bytes)
+#
+# hrStorageType OIDs of interest:
+#   .1.3.6.1.2.1.25.2.1.2 = hrStorageRam
+#   .1.3.6.1.2.1.25.2.1.4 = hrStorageFixedDisk
+get_host_resources() {
+    local ip="$1" community="$2" ver="$3"
+
+    local snmp_args="-${ver} -c ${community} -t ${SNMP_TIMEOUT} -r ${SNMP_RETRIES} -On"
+
+    # ── CPU load (hrProcessorLoad — average across all processors) ────────────
+    local cpu_raw cpu_pct="N/A"
+    cpu_raw=$(snmpwalk ${snmp_args} "${ip}:${SNMP_PORT}"                        .1.3.6.1.2.1.25.3.3.1.2 2>/dev/null || true)
+    if [[ -n "$cpu_raw" ]]; then
+        # Average all processor load values
+        cpu_pct=$(printf '%s' "$cpu_raw" |             awk -F': ' 'NF>1{sum+=$NF; n++} END{if(n>0) printf "%d", sum/n; else print "N/A"}')
+    fi
+
+    # ── Storage table walks ───────────────────────────────────────────────────
+    local stype_raw sdesc_raw sunit_raw ssize_raw sused_raw
+    stype_raw=$(snmpwalk ${snmp_args} "${ip}:${SNMP_PORT}" .1.3.6.1.2.1.25.2.3.1.2 2>/dev/null || true)
+    sdesc_raw=$(snmpwalk ${snmp_args} "${ip}:${SNMP_PORT}" .1.3.6.1.2.1.25.2.3.1.3 2>/dev/null || true)
+    sunit_raw=$(snmpwalk ${snmp_args} "${ip}:${SNMP_PORT}" .1.3.6.1.2.1.25.2.3.1.4 2>/dev/null || true)
+    ssize_raw=$(snmpwalk ${snmp_args} "${ip}:${SNMP_PORT}" .1.3.6.1.2.1.25.2.3.1.5 2>/dev/null || true)
+    sused_raw=$(snmpwalk ${snmp_args} "${ip}:${SNMP_PORT}" .1.3.6.1.2.1.25.2.3.1.6 2>/dev/null || true)
+
+    # Return empty if no storage data at all
+    if [[ -z "$cpu_raw" && -z "$ssize_raw" ]]; then
+        printf ''; return
+    fi
+
+    declare -A stype_map sdesc_map sunit_map ssize_map sused_map
+    local line oid idx val
+
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        oid=$(printf '%s' "$line" | awk '{print $1}')
+        idx=$(printf '%s' "$oid"  | awk -F'.' '{print $NF}')
+        # Type is an OID value like .1.3.6.1.2.1.25.2.1.2 — keep last two components
+        val=$(printf '%s' "$line" | awk -F':' '{print $NF}' | tr -d ' \r')
+        [[ "$idx" =~ ^[0-9]+$ ]] && stype_map["$idx"]="$val"
+    done <<< "$stype_raw"
+
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        oid=$(printf '%s' "$line" | awk '{print $1}')
+        idx=$(printf '%s' "$oid"  | awk -F'.' '{print $NF}')
+        val=$(printf '%s' "$line" | sed 's/.*STRING: //' | tr -d '"\r')
+        [[ "$idx" =~ ^[0-9]+$ ]] && sdesc_map["$idx"]="$val"
+    done <<< "$sdesc_raw"
+
+    for _raw_ref in sunit_raw ssize_raw sused_raw; do
+        local _map_name="${_raw_ref/_raw/_map}"
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            oid=$(printf '%s' "$line" | awk '{print $1}')
+            idx=$(printf '%s' "$oid"  | awk -F'.' '{print $NF}')
+            # Strip everything after (and including) the first non-digit/non-minus
+            # character after the colon — handles "1024 Bytes", "4096Bytes", etc.
+            val=$(printf '%s' "$line" | awk -F':' '{print $NF}' | \
+                  sed 's/^[[:space:]]*//' | grep -o '^-\?[0-9]*')
+            [[ -z "$val" ]] && val="0"
+            [[ "$idx" =~ ^[0-9]+$ ]] && eval "${_map_name}[\"$idx\"]=\"$val\""
+        done <<< "${!_raw_ref}"
+    done
+
+    local result="${cpu_pct}"
+    local sorted_keys
+    sorted_keys=$(printf '%s\n' "${!sdesc_map[@]}" | sort -n)
+
+    while IFS= read -r idx; do
+        [[ -z "$idx" ]] && continue
+        local tp="${stype_map[$idx]:-}"
+        local desc="${sdesc_map[$idx]:-}"
+        local unit="${sunit_map[$idx]:-1}"
+        local size="${ssize_map[$idx]:-0}"
+        local used="${sused_map[$idx]:-0}"
+
+        # ── Classify storage type ─────────────────────────────────────────────
+        # Handles both numeric OID suffix (.25.2.1.N) and symbolic names.
+        # .2 / hrStorageRam           → M: (memory)
+        # .4 / hrStorageFixedDisk     → D: (disk)
+        # .5 / hrStorageRemovableDisk → D: (USB drives on Raspberry Pi)
+        # .9 / hrStorageFlashMemory   → D: (SD card on Raspberry Pi)
+        # .10/ hrStorageNetworkDisk   → D: (NFS / CIFS mounts)
+        # .3 / hrStorageVirtualMemory → skip (swap; not useful to display)
+        # .8 / hrStorageRamDisk       → skip (tmpfs — too noisy)
+        # .1 / hrStorageOther         → skip unless size > 0 and desc looks real
+        local prefix=""
+        if   printf '%s' "$tp" | grep -qE '25\.2\.1\.2|hrStorageRam$'; then
+            prefix="M:"
+        elif printf '%s' "$tp" | grep -qE '25\.2\.1\.(4|5|9|10)|hrStorageFixedDisk|hrStorageRemovableDisk|hrStorageFlashMemory|hrStorageNetworkDisk'; then
+            prefix="D:"
+        else
+            continue   # skip RAM disks, virtual memory, swap, other
+        fi
+
+        # ── Skip kernel pseudo-filesystems by mount description ───────────────
+        # These have size=0 or mount paths that are clearly not user-visible storage.
+        local desc_lower
+        desc_lower=$(printf '%s' "$desc" | tr '[:upper:]' '[:lower:]')
+        if printf '%s' "$desc_lower" | grep -qE \
+            '^/sys|^/proc|^/dev$|/cgroup|/bpf|/pstore|^devtmpfs|^udev$'; then
+            continue
+        fi
+        # Also skip zero-size entries that snmpd lists but have no real storage
+        local size_clean
+        size_clean=$(printf '%s' "$size" | grep -o '^[0-9]*'); size_clean=${size_clean:-0}
+        [[ "$prefix" == "D:" && "$size_clean" -eq 0 ]] && continue
+
+        desc=$(printf '%s' "$desc" | tr '|~\t' '   ' | cut -c1-30)
+        result+="|${prefix}${idx}~${desc}~${used}~${size}~${unit}"
     done <<< "$sorted_keys"
 
     printf '%s' "$result"
@@ -702,11 +932,15 @@ run_scan() {
         printf '%s' "$line" | grep -q 'lladdr' || continue
         mac=$(printf '%s' "$line" | awk '{for(i=1;i<=NF;i++) if($i=="lladdr") print $(i+1)}')
         [[ -z "$mac" ]] && continue
+        if ip_ignored "$ip"; then
+            printf '[netman_monitor] Ignoring %s (matches ignore list)\n' "$ip"
+            continue
+        fi
         hosts+=("${ip} ${mac}")
     done < <(ip neighbor show 2>/dev/null | tr -d '\r')
 
     local total=${#hosts[@]}
-    printf '[netman_monitor] %d host(s) found\n' "$total"
+    printf '[netman_monitor] %d host(s) queued for scan\n' "$total"
 
     local tmp_snap
     tmp_snap=$(mktemp)
@@ -729,7 +963,7 @@ run_scan() {
 
         # ── nmap SNMP probe ──────────────────────────────────────────────────
         local snmp_port_state community snmp_ver sys_name sys_descr uptime_str
-        local port_status="" printer_info="" device_type="" snmp_tmp
+        local port_status="" printer_info="" device_type="" host_info="" snmp_tmp
         if snmp_probe "${ip}"; then
             snmp_port_state="open"
             local ver_hint="${SNMP_NMAP_VERSION:-unknown}"
@@ -753,6 +987,11 @@ run_scan() {
                 printer_info=$(get_printer_info "${ip}" "${community}" "${snmp_ver}")
                 device_type=$(detect_device_type "${ip}" "${community}" "${snmp_ver}" \
                                                  "${printer_info}" "${sys_descr}")
+                # Fetch host resources for non-printer devices
+                local host_info=""
+                if [[ "$device_type" != "printer" ]]; then
+                    host_info=$(get_host_resources "${ip}" "${community}" "${snmp_ver}")
+                fi
             fi
         else
             snmp_port_state="closed"
@@ -778,7 +1017,8 @@ run_scan() {
       "uptime":       "$(json_esc "$uptime_str")",
       "port_status":  "$(json_esc "$port_status")",
       "printer_info": "$(json_esc "$printer_info")",
-      "device_type":  "$(json_esc "$device_type")"
+      "device_type":  "$(json_esc "$device_type")",
+      "host_info":    "$(json_esc "$host_info")"
     }
 JSONBLOCK
 
@@ -918,21 +1158,28 @@ render_printer_supplies() {
 
     # ── make_bar LEVEL MAX — produce a [████░░░░] PCT% string ────────────────
     make_bar() {
-        local lv="$1" mx="$2"
-        local bar_col="${G}" bar_str pct bar_len empty_len filled="" empty="" b
+        local lv mx bar_col
+        lv=$(printf '%s' "${1:-0}" | grep -o '^-\?[0-9]*'); lv=${lv:-0}
+        mx=$(printf '%s' "${2:-0}" | grep -o '^-\?[0-9]*'); mx=${mx:-0}
+        bar_col="${G}"
 
         # Negative values: -2 = no restriction (treat as full), -1 = unknown
         if [[ "$lv" -eq -2 ]] 2>/dev/null; then
-            printf '%b[████████████████████] OK%b' "${G}" "${RST}"; return
+            printf '%b[████████████████████] 100%%%b' "${G}" "${RST}"; return
         fi
         if [[ "$lv" -lt 0 || "$mx" -le 0 ]] 2>/dev/null; then
-            printf '%b[  level unknown    ]%b' "${DIM}" "${RST}"; return
+            printf '%b[    N/A             ]  N/A%b' "${DIM}" "${RST}"; return
         fi
-        pct=$(( lv * 100 / mx ))
+
+        local pct bar_len empty_len filled empty b
+        # Use scaled arithmetic (×1000 then ÷10) to avoid 1/125 → 0%
+        pct=$(( (lv * 1000 / mx + 5) / 10 ))
         [[ $pct -lt 0   ]] && pct=0
         [[ $pct -gt 100 ]] && pct=100
         bar_len=$(( pct * 20 / 100 ))
         empty_len=$(( 20 - bar_len ))
+        filled=""
+        empty=""
         for (( b=0; b<bar_len;   b++ )); do filled+='█'; done
         for (( b=0; b<empty_len; b++ )); do empty+='░'; done
         [[ $pct -lt 20 ]] && bar_col="${R}"
@@ -982,9 +1229,11 @@ render_printer_supplies() {
             tname=$(printf '%s'  "$rec" | cut -d'~' -f2)
             tlevel=$(printf '%s' "$rec" | cut -d'~' -f3)
 
-            # Tray level: 0=empty  positive=sheets  -2=unknown/full  -3=empty(some models)
+            # Tray level: 0=empty  positive=sheets  -2=uncountable(OK)  -3=empty(some models)
             local tray_col="${G}" tray_str
-            if [[ "$tlevel" -eq 0 || "$tlevel" -eq -3 ]] 2>/dev/null; then
+            if [[ "$tlevel" -eq -2 ]] 2>/dev/null; then
+                tray_col="${G}"; tray_str="OK"
+            elif [[ "$tlevel" -eq 0 || "$tlevel" -eq -3 ]] 2>/dev/null; then
                 tray_col="${R}"; tray_str="EMPTY"
             elif [[ "$tlevel" -lt 0 ]] 2>/dev/null; then
                 tray_col="${DIM}"; tray_str="unknown"
@@ -996,7 +1245,128 @@ render_printer_supplies() {
             tname_trunc=$(printf '%.30s' "$tname")
             printf '  %b  %-8s %-30s %b%s%b\n' \
                 "${DIM}" "tray" "$tname_trunc" "$tray_col" "$tray_str" "${RST}"
+        elif [[ "$prefix" == "C:" ]]; then
+            # Cover/door record: C:idx~name~status
+            # prtCoverStatus (RFC 3805): 1=other 3=doorOpen 4=doorClosed
+            #                            5=interlockOpen 6=interlockClosed
+            # 0 = not applicable on this device — skip entirely
+            local rec="${part:2}"
+            local cname cstatus cname_trunc cstatus_str cstatus_col
+            cname=$(printf '%s'   "$rec" | cut -d'~' -f2)
+            cstatus=$(printf '%s' "$rec" | cut -d'~' -f3)
+            # Skip covers reported as N/A (status=0) — HP uses 0 for absent covers
+            [[ "$cstatus" == "0" || -z "$cstatus" ]] && continue
+            cname_trunc=$(printf '%.30s' "$cname")
+            case "$cstatus" in
+                3|5) cstatus_str="OPEN";    cstatus_col="${R}"   ;;
+                4|6) cstatus_str="closed";  cstatus_col="${G}"   ;;
+                *)   cstatus_str="unknown"; cstatus_col="${DIM}" ;;
+            esac
+            printf '  %b  %-8s %-30s %b%s%b\n' \
+                "${DIM}" "cover" "$cname_trunc" "$cstatus_col" "$cstatus_str" "${RST}"
         fi
+    done
+}
+
+# ── Render HOST-RESOURCES-MIB data (CPU, RAM, disks) ─────────────────────────
+# Consumes output from get_host_resources.
+# Format: cpu_pct|M:idx~desc~used~total~units|D:idx~desc~used~total~units|...
+render_host_resources() {
+    local host_info="$1"
+    [[ -z "$host_info" ]] && return
+
+    local IFS_ORIG="$IFS"
+    IFS='|' read -ra parts <<< "$host_info"
+    IFS="$IFS_ORIG"
+
+    local cpu_pct="${parts[0]:-N/A}"
+
+    # ── make_bar reused from printer context — define inline here too ──────────
+    _hr_bar() {
+        # Strip any non-numeric suffix from inputs before arithmetic
+        local used total bar_col
+        used=$(printf '%s' "${1:-0}" | grep -o '^[0-9]*'); used=${used:-0}
+        total=$(printf '%s' "${2:-0}" | grep -o '^[0-9]*'); total=${total:-0}
+        bar_col="${G}"
+
+        if [[ "$total" -le 0 ]] 2>/dev/null || [[ "$total" == "0" ]]; then
+            # Width must match normal bar: "[" + 20 chars + "]" + " " + 3 chars + "%" = 27
+            printf '%b[    N/A             ]  N/A%b' "${DIM}" "${RST}"; return
+        fi
+
+        # Declare separately from assignment — prevents "unbound variable" under set -u
+        # when arithmetic expansion is combined with local on one line
+        local pct bar_len empty_len filled empty b
+        pct=$(( used * 100 / total ))
+        [[ $pct -lt 0   ]] && pct=0
+        [[ $pct -gt 100 ]] && pct=100
+        bar_len=$(( pct * 20 / 100 ))
+        empty_len=$(( 20 - bar_len ))
+        filled=""
+        empty=""
+        for (( b=0; b<bar_len;   b++ )); do filled+='█'; done
+        for (( b=0; b<empty_len; b++ )); do empty+='░'; done
+        [[ $pct -ge 90 ]] && bar_col="${R}"
+        [[ $pct -ge 75 && $pct -lt 90 ]] && bar_col="${Y}"
+        printf '%b[%s%s] %3d%%%b' "$bar_col" "$filled" "$empty" "$pct" "${RST}"
+    }
+
+    # ── CPU ───────────────────────────────────────────────────────────────────
+    if [[ "$cpu_pct" != "N/A" ]]; then
+        local cpu_col="${G}"
+        [[ "$cpu_pct" -ge 90 ]] 2>/dev/null && cpu_col="${R}"
+        [[ "$cpu_pct" -ge 75 && "$cpu_pct" -lt 90 ]] 2>/dev/null && cpu_col="${Y}"
+        printf '  %bCPU      :%b  %b%3d%%%b\n' "${DIM}" "${RST}" "$cpu_col" "$cpu_pct" "${RST}"
+    fi
+
+    # ── Memory and Disk ───────────────────────────────────────────────────────
+    local i
+    for (( i=1; i<${#parts[@]}; i++ )); do
+        local part="${parts[$i]}"
+        [[ -z "$part" ]] && continue
+        local prefix="${part:0:2}"
+        local rec="${part:2}"
+        local desc used total units label
+        desc=$(printf '%s'  "$rec" | cut -d'~' -f2)
+        used=$(printf '%s'  "$rec" | cut -d'~' -f3)
+        total=$(printf '%s' "$rec" | cut -d'~' -f4)
+        units=$(printf '%s' "$rec" | cut -d'~' -f5)
+
+        # Sanitise — strip any non-numeric suffix (e.g. "1024Bytes" → "1024")
+        used=$(printf '%s'  "$used"  | grep -o '^-\?[0-9]*'); used=${used:-0}
+        total=$(printf '%s' "$total" | grep -o '^-\?[0-9]*'); total=${total:-0}
+        units=$(printf '%s' "$units" | grep -o '^-\?[0-9]*'); units=${units:-1}
+        [[ "$units" -le 0 ]] 2>/dev/null && units=1
+
+        # Convert to human-readable (bytes → MiB or GiB)
+        local used_bytes total_bytes used_hr total_hr
+        used_bytes=$(( used  * units ))
+        total_bytes=$(( total * units ))
+
+        hr_bytes() {
+            local b="$1"
+            if   [[ $b -ge 1073741824 ]]; then printf '%d GiB' $(( b / 1073741824 ))
+            elif [[ $b -ge 1048576    ]]; then printf '%d MiB' $(( b / 1048576 ))
+            elif [[ $b -ge 1024       ]]; then printf '%d KiB' $(( b / 1024 ))
+            else printf '%d B' "$b"
+            fi
+        }
+
+        used_hr=$(hr_bytes "$used_bytes")
+        total_hr=$(hr_bytes "$total_bytes")
+
+        local desc_trunc
+        desc_trunc=$(printf '%.30s' "$desc")
+
+        if [[ "$prefix" == "M:" ]]; then
+            label="Memory"
+        else
+            label="Disk"
+        fi
+
+        printf '  %b%-8s :%b  %-30s %b' "${DIM}" "$label" "${RST}" "$desc_trunc" "${RST}"
+        _hr_bar "$used" "$total"
+        printf '  %b%s / %s%b\n' "${DIM}" "$used_hr" "$total_hr" "${RST}"
     done
 }
 
@@ -1009,7 +1379,7 @@ show_dashboard() {
 
     # ── Parse snapshot ────────────────────────────────────────────────────────
     declare -a d_ip d_mac d_vendor d_ping d_lat d_snmpport d_snmpver \
-               d_community d_sysname d_descr d_uptime d_portstatus d_printerinfo d_devicetype
+               d_community d_sysname d_descr d_uptime d_portstatus d_printerinfo d_devicetype d_hostinfo
     local scan_time="" idx=-1 in_hosts=0 line
 
     while IFS= read -r line; do
@@ -1048,6 +1418,8 @@ show_dashboard() {
             then d_printerinfo[$idx]="${BASH_REMATCH[1]}"; fi
         if [[ "$line" =~ \"device_type\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]];
             then d_devicetype[$idx]="${BASH_REMATCH[1]}"; fi
+        if [[ "$line" =~ \"host_info\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]];
+            then d_hostinfo[$idx]="${BASH_REMATCH[1]}"; fi
     done < "${SNAPSHOT}"
 
     local total=$(( idx + 1 ))
@@ -1150,6 +1522,7 @@ show_dashboard() {
             local port_status="${d_portstatus[$i]:-}"
             local printer_info="${d_printerinfo[$i]:-}"
             local device_type="${d_devicetype[$i]:-}"
+            local host_info="${d_hostinfo[$i]:-}"
 
             local mac_lower hostname=""
             mac_lower=$(printf '%s' "$mac" | tr '[:upper:]' '[:lower:]')
@@ -1216,6 +1589,11 @@ show_dashboard() {
             # Printer section (only if this device is a printer)
             if [[ -n "$printer_info" ]]; then
                 render_printer_supplies "$printer_info"
+            fi
+
+            # Host resources (non-printer devices with HOST-RESOURCES-MIB)
+            if [[ -n "$host_info" && "$device_type" != "printer" ]]; then
+                render_host_resources "$host_info"
             fi
         done
     fi
