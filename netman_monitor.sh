@@ -847,7 +847,7 @@ get_host_resources() {
         local desc_lower
         desc_lower=$(printf '%s' "$desc" | tr '[:upper:]' '[:lower:]')
         if printf '%s' "$desc_lower" | grep -qE \
-            '^/sys|^/proc|^/dev$|/cgroup|/bpf|/pstore|^devtmpfs|^udev$'; then
+            '^/sys|^/proc|^/dev$|/cgroup|/bpf|/pstore|^devtmpfs|^udev$|^/run|^/overlay'; then
             continue
         fi
         # Also skip zero-size entries that snmpd lists but have no real storage
