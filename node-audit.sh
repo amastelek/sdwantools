@@ -1,12 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
-# FINAL ENHANCED Bash History + Binaries + Logs + Firewall + Remediation Audit
+# FINAL ENHANCED Bash History + Binaries + Logs + Firewall + Processes Audit
 # Compatible with: Debian Buster (10) and openSUSE Leap 15.6
-# NEW IN THIS VERSION:
-#   • VT API key prompt ONLY when suspicious binaries are found
-#   • Double-check that key is not blank after paste
-#   • New Systemd Services Audit (last 30 days) — flags created/removed units
-#   • All previous features preserved (nftables, sshguard, history remediation, etc.)
 # =============================================================================
 
 set -o pipefail
@@ -19,12 +14,11 @@ GREEN='\033[0;32m'
 RESET='\033[0m'
 
 # ----------------------------- CONFIG -----------------------------
-VT_API_KEY="${VT_API_KEY:-}"          # Only prompted later if binaries exist
+VT_API_KEY="${VT_API_KEY:-}"
 THIRTY_DAYS_AGO=$(date -d "30 days ago" +%s 2>/dev/null || echo 0)
 
 # ----------------------------- PATTERNS -----------------------------
 CRITICAL_PATTERNS=(
-    # Reverse shells
     'bash[[:space:]]+-i[[:space:]]+>&[[:space:]]*/dev/tcp/'
     '/dev/tcp/[0-9]{1,3}\.'
     'nc[[:space:]]+(-e|--exec)[[:space:]]+/bin/(sh|bash)'
@@ -36,8 +30,6 @@ CRITICAL_PATTERNS=(
     'ruby[[:space:]]+-e.*(TCPSocket|socket)'
     'php[[:space:]]+-r.*fsockopen'
     'python[[:space:]]+-c.*(socket|subprocess).*shell'
-
-    # Credential leaks
     '--password=[^[:space:]]+'
     'token=[^[:space:]]+'
     'apikey=[^[:space:]]+'
@@ -61,7 +53,6 @@ MEDIUM_PATTERNS=(
     'sudo[[:space:]]+-l'
 )
 
-# Journal patterns
 J_CRIT_PATTERNS=(
     'Failed password for'
     'authentication failure'
@@ -77,7 +68,6 @@ J_HIGH_PATTERNS=(
     'sshd.*Accepted password for.*from'
 )
 
-# Systemd service change patterns
 SYSTEMD_CRIT_PATTERNS=(
     'Created symlink.*\.service.*(tmp|dev/shm|backdoor|miner|c2|reverse)'
     'Unit .* from /tmp'
@@ -90,6 +80,9 @@ SYSTEMD_HIGH_PATTERNS=(
     'Removed symlink.*\.service'
     'Unit .* (started|loaded|changed)'
 )
+
+# Suspicious process patterns (reverse shells, miners, recon tools)
+SUSPICIOUS_PROC_REGEX='nc|ncat|socat|bash -i|python.*socket|perl.*socket|xmrig|minerd|linpeas|pspy|linux-exploit-suggester|dirtycow|cowroot'
 
 # ----------------------------- Functions -----------------------------
 get_severity() {
@@ -177,7 +170,6 @@ else
     echo -e "${GREEN}✓ Bash history is NOT disabled${RESET}"
 fi
 
-# Create /etc/profile.d/history.sh if missing
 if [[ $EUID -eq 0 ]]; then
     if [[ ! -f /etc/profile.d/history.sh ]]; then
         echo -e "${YELLOW}Creating /etc/profile.d/history.sh ...${RESET}"
@@ -237,7 +229,7 @@ for hist in "${HIST_FILES[@]}"; do
     [[ $issues -eq 0 ]] && echo -e "${GREEN}✓ Clean${RESET}" || echo -e "${YELLOW}⚠ ${issues} issue(s)${RESET}"
 done
 
-# ----------------------------- Suspicious Binaries + VT (prompt only here) -----------------------------
+# ----------------------------- Suspicious Binaries + VT -----------------------------
 echo -e "\n${GREEN}=== Scanning /tmp & /dev/shm for suspicious binaries + VirusTotal ===${RESET}"
 mapfile -t suspicious < <(find /tmp /dev/shm -type f -executable -mtime -30 2>/dev/null)
 
@@ -246,7 +238,6 @@ if [[ ${#suspicious[@]} -eq 0 ]]; then
 else
     echo -e "${YELLOW}Found ${#suspicious[@]} suspicious binary(ies)${RESET}"
 
-    # Secure VT key prompt ONLY if binaries exist and key is missing
     if [[ -z "$VT_API_KEY" ]]; then
         echo -e "\n${YELLOW}VirusTotal API key not set.${RESET}"
         echo -e "${ORANGE}WARNING: Never use 'export VT_API_KEY=...' (it appears in history!)${RESET}"
@@ -260,7 +251,6 @@ else
         fi
     fi
 
-    # Now scan binaries
     for bin in "${suspicious[@]}"; do
         [[ ! -f "$bin" ]] && continue
         hash=$(sha256sum "$bin" 2>/dev/null | cut -d' ' -f1)
@@ -269,6 +259,46 @@ else
         vt_lookup "$hash" "$bin"
     done
 fi
+
+# ----------------------------- Running Processes Audit -----------------------------
+echo -e "\n${GREEN}=== Running Processes Audit (suspicious + Top 5 CPU) ===${RESET}"
+
+# Suspicious processes scan
+echo -e "${YELLOW}Scanning for suspicious processes...${RESET}"
+PROC_ISSUES=0
+while IFS= read -r line || [[ -n $line ]]; do
+    [[ -z "$line" ]] && continue
+
+    # Skip this audit script itself (avoid false positive)
+    if echo "$line" | grep -qE 'node-audit\.sh|bash.*node-audit\.sh'; then
+        continue
+    fi
+
+    # Skip known legitimate irqbalance
+    if echo "$line" | grep -qE 'irqbalance.*--foreground'; then
+        continue
+    fi
+
+    if echo "$line" | grep -Eiq "$SUSPICIOUS_PROC_REGEX"; then
+        echo -e "${RED}[CRITICAL PROCESS] $line${RESET}"
+        ((COUNTS[CRITICAL]++))
+        ((PROC_ISSUES++))
+    fi
+done < <(ps -eo pid,user,cmd --no-headers)
+
+[[ $PROC_ISSUES -eq 0 ]] && echo -e "${GREEN}✓ No suspicious processes found${RESET}" || echo -e "${YELLOW}⚠ ${PROC_ISSUES} suspicious process(es)${RESET}"
+
+# Top 5 CPU processes (exclude this script)
+echo -e "\n${YELLOW}Top 5 CPU-consuming processes:${RESET}"
+ps -eo pid,user,%cpu,cmd --sort=-%cpu --no-headers | head -n 10 | while read -r p; do
+    # Skip the audit script process
+    if echo "$p" | grep -qE 'node-audit\.sh|bash.*node-audit\.sh'; then
+        continue
+    fi
+    # Only show up to 5 after filtering
+    ((count++ > 5)) && break
+    echo -e "${ORANGE}$p${RESET}"
+done
 
 # ----------------------------- nftables Firewall Review -----------------------------
 echo -e "\n${GREEN}=== nftables Firewall Review ===${RESET}"
@@ -329,7 +359,7 @@ else
     echo -e "${YELLOW}journalctl unavailable${RESET}"
 fi
 
-# ----------------------------- NEW: Systemd Services Audit (last 30 days) -----------------------------
+# ----------------------------- Systemd Services Audit (last 30 days) -----------------------------
 echo -e "\n${GREEN}=== Systemd Services Audit (created/removed units — last 30 days) ===${RESET}"
 if command -v journalctl >/dev/null 2>&1; then
     SYS_ISSUES=0
@@ -379,7 +409,8 @@ fi
 echo -e "\n${YELLOW}Notes:${RESET}"
 echo -e "• VT key is ONLY asked if suspicious binaries are found"
 echo -e "• Key never saved to history (invisible prompt + double-checked for blank)"
-echo -e "• Systemd audit flags newly created/removed services (especially suspicious ones)"
+echo -e "• Process scan excludes this audit script and legitimate irqbalance"
+echo -e "• Top 5 CPU list also excludes this script"
 echo -e "• Run as root for full coverage"
 
 exit 0
