@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 # =============================================================================
-# FINAL ENHANCED Bash History + Binaries + Logs + Firewall + Processes Audit
+# FINAL ENHANCED Bash History + Binaries + Logs + Firewall + Processes + CISA KEV Audit
 # Compatible with: Debian Buster (10) and openSUSE Leap 15.6
+# NEW IN THIS VERSION:
+#   • CISA Known Exploited Vulnerabilities (KEV) check
+#     - Pulls live https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
+#     - Detects Debian or openSUSE
+#     - Cross-references installed packages against CISA product list
+#     - Flags any matches as CRITICAL
+#   • Process audit still excludes this script itself and irqbalance --foreground
 # =============================================================================
 
 set -o pipefail
@@ -81,7 +88,7 @@ SYSTEMD_HIGH_PATTERNS=(
     'Unit .* (started|loaded|changed)'
 )
 
-# Suspicious process patterns (reverse shells, miners, recon tools)
+# Suspicious process patterns
 SUSPICIOUS_PROC_REGEX='nc|ncat|socat|bash -i|python.*socket|perl.*socket|xmrig|minerd|linpeas|pspy|linux-exploit-suggester|dirtycow|cowroot'
 
 # ----------------------------- Functions -----------------------------
@@ -269,7 +276,7 @@ PROC_ISSUES=0
 while IFS= read -r line || [[ -n $line ]]; do
     [[ -z "$line" ]] && continue
 
-    # Skip this audit script itself (avoid false positive)
+    # Skip this audit script itself
     if echo "$line" | grep -qE 'node-audit\.sh|bash.*node-audit\.sh'; then
         continue
     fi
@@ -290,15 +297,15 @@ done < <(ps -eo pid,user,cmd --no-headers)
 
 # Top 5 CPU processes (exclude this script)
 echo -e "\n${YELLOW}Top 5 CPU-consuming processes:${RESET}"
-ps -eo pid,user,%cpu,cmd --sort=-%cpu --no-headers | head -n 10 | while read -r p; do
-    # Skip the audit script process
+count=0
+while IFS= read -r p; do
     if echo "$p" | grep -qE 'node-audit\.sh|bash.*node-audit\.sh'; then
         continue
     fi
-    # Only show up to 5 after filtering
-    ((count++ > 5)) && break
     echo -e "${ORANGE}$p${RESET}"
-done
+    ((count++))
+    ((count >= 5)) && break
+done < <(ps -eo pid,user,%cpu,cmd --sort=-%cpu --no-headers)
 
 # ----------------------------- nftables Firewall Review -----------------------------
 echo -e "\n${GREEN}=== nftables Firewall Review ===${RESET}"
@@ -392,6 +399,58 @@ else
     echo -e "${YELLOW}journalctl unavailable${RESET}"
 fi
 
+# ----------------------------- CISA Known Exploited Vulnerabilities (KEV) Cross-Reference -----------------------------
+echo -e "\n${GREEN}=== CISA Known Exploited Vulnerabilities (KEV) Cross-Reference ===${RESET}"
+if ! command -v jq >/dev/null 2>&1; then
+    echo -e "${YELLOW}jq not installed — skipping CISA KEV check (apt install jq or zypper install jq)${RESET}"
+else
+    DISTRO="unknown"
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        case "$ID" in
+            debian|ubuntu) DISTRO="debian" ;;
+            opensuse*|suse) DISTRO="opensuse" ;;
+        esac
+    fi
+
+    if [[ "$DISTRO" == "unknown" ]]; then
+        echo -e "${YELLOW}Unknown distro — skipping package cross-reference${RESET}"
+    else
+        echo -e "${YELLOW}Detected: $DISTRO${RESET}"
+
+        # Fetch live CISA KEV list and extract lowercase products
+        mapfile -t KEV_PRODUCTS < <(curl -s --max-time 15 "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json" \
+            | jq -r '.vulnerabilities[].product | ascii_downcase' | sort -u 2>/dev/null)
+
+        # Get installed packages (lowercase)
+        if [[ "$DISTRO" == "debian" ]]; then
+            mapfile -t INSTALLED_PACKAGES < <(dpkg-query -W -f='${Package}\n' 2>/dev/null | tr '[:upper:]' '[:lower:]' | sort -u)
+        else
+            mapfile -t INSTALLED_PACKAGES < <(rpm -qa --qf '%{NAME}\n' 2>/dev/null | tr '[:upper:]' '[:lower:]' | sort -u)
+        fi
+
+        if [[ ${#KEV_PRODUCTS[@]} -eq 0 ]]; then
+            echo -e "${YELLOW}Could not fetch CISA KEV list${RESET}"
+        elif [[ ${#INSTALLED_PACKAGES[@]} -eq 0 ]]; then
+            echo -e "${YELLOW}No packages detected${RESET}"
+        else
+            MATCH_FOUND=0
+            for pkg in "${INSTALLED_PACKAGES[@]}"; do
+                if printf '%s\n' "${KEV_PRODUCTS[@]}" | grep -q -i -F -- "$pkg"; then
+                    echo -e "${RED}[CISA KEV MATCH] Package '$pkg' is in CISA Known Exploited Vulnerabilities${RESET}"
+                    ((MATCH_FOUND++))
+                    ((COUNTS[CRITICAL]++))
+                fi
+            done
+            if [[ $MATCH_FOUND -eq 0 ]]; then
+                echo -e "${GREEN}✓ No installed packages match CISA KEV products${RESET}"
+            else
+                echo -e "${YELLOW}⚠ $MATCH_FOUND CISA KEV match(es) found — review CVEs manually${RESET}"
+            fi
+        fi
+    fi
+fi
+
 # ----------------------------- FINAL SUMMARY -----------------------------
 echo -e "\n${GREEN}=== FINAL AUDIT SUMMARY (30-day window) ===${RESET}"
 echo -e "CRITICAL : ${RED}${COUNTS[CRITICAL]}${RESET}"
@@ -411,6 +470,7 @@ echo -e "• VT key is ONLY asked if suspicious binaries are found"
 echo -e "• Key never saved to history (invisible prompt + double-checked for blank)"
 echo -e "• Process scan excludes this audit script and legitimate irqbalance"
 echo -e "• Top 5 CPU list also excludes this script"
+echo -e "• CISA KEV check uses live JSON + installed packages (Debian/openSUSE)"
 echo -e "• Run as root for full coverage"
 
 exit 0
